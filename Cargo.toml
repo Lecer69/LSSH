@@ -1,0 +1,23 @@
+[package]
+name = "lssh"
+version = "0.1.0"
+edition = "2024"
+resolver = "2"
+description = "Simple terminal SSH server manager"
+license = "Unlicense"
+
+[[bin]]
+name = "lssh"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+colored = "3"
+rpassword = "7"
+keyring = { version = "3", features = ["sync-secret-service"] }
+
+[profile.release]
+lto = true
+strip = true
