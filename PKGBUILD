@@ -9,7 +9,7 @@ license=('Unlicense')
 depends=('openssh' 'sshpass')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Lecer69/LSSH/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP') # run 'updpkgsums' after tagging v$pkgver
+sha256sums=('aeb3a3df778e87400da67238c9d25119297531fa9ca71b3ba3d89911834ccabb')
 
 build() {
     cd "LSSH-$pkgver"
