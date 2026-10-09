@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
+use crate::config;
+use crate::session::{self, Session};
 use crate::store::{self, Server};
 
 pub fn add(path: &PathBuf, name: &str, target: &str) -> Result<()> {
@@ -49,8 +51,8 @@ pub fn list(path: &PathBuf) -> Result<()> {
 }
 
 /// Check that `sshpass` is installed. ssh only reads passwords from the
-/// TTY, so sshpass is needed to feed it one.
-fn sshpass_available() -> bool {
+/// TTY, so sshpass is needed to feed it one non-interactively.
+pub(crate) fn sshpass_available() -> bool {
     std::process::Command::new("sshpass")
         .arg("-V")
         .stdout(std::process::Stdio::null())
@@ -58,9 +60,6 @@ fn sshpass_available() -> bool {
         .status()
         .is_ok()
 }
-
-const SSPASS_HINT: &str =
-    "sshpass is required for saved passwords, install it (e.g. 'sudo pacman -S sshpass')";
 
 const KEYRING_SERVICE: &str = "lssh";
 
@@ -124,36 +123,34 @@ fn delete_saved_password(name: &str) {
 
 pub fn connect(path: &PathBuf, name: &str) -> Result<()> {
     let servers = store::load(path)?;
-    let idx = servers
+    let server = servers
         .iter()
-        .position(|s| s.name == name)
+        .find(|s| s.name == name)
         .with_context(|| {
             format!(
                 "no server named '{name}' (see 'lssh ls')",
                 name = name.red()
             )
-        })?;
+        })?
+        .clone();
+
+    // Load (and create, on first run) the user config.
+    let config = config::load();
 
     println!(
         "{} connecting to {}@{} ...",
         "→".cyan().bold(),
-        servers[idx].user.yellow(),
-        servers[idx].host.blue()
+        server.user.yellow(),
+        server.host.blue()
     );
 
     // Ask for the password if none is saved.
     let mut password = get_saved_password(name);
     if password.is_none() {
-        if !sshpass_available() {
-            println!(
-                "{} {} not installed, falling back to plain ssh (password will not be saved)",
-                "ℹ".cyan().bold(),
-                "sshpass".yellow()
-            );
-        } else {
+        if sshpass_available() {
             let pw = rpassword::prompt_password(format!(
                 "enter password for {}@{}: ",
-                servers[idx].user, servers[idx].host
+                server.user, server.host
             ))
             .context("failed to read password")?;
             if pw.is_empty() {
@@ -161,33 +158,41 @@ pub fn connect(path: &PathBuf, name: &str) -> Result<()> {
             }
             save_password(name, &pw);
             password = Some(pw);
+        } else {
+            println!(
+                "{} {} not installed; ssh will ask for the password and it won't be saved",
+                "ℹ".cyan().bold(),
+                "sshpass".yellow()
+            );
         }
+    } else if !sshpass_available() {
+        println!(
+            "{} {} not installed; the saved password cannot be replayed, ssh will ask again",
+            "ℹ".cyan().bold(),
+            "sshpass".yellow()
+        );
     }
 
-    let target = format!("{}@{}", servers[idx].user, servers[idx].host);
-    let status = match &password {
-        Some(pw) => {
-            if !sshpass_available() {
-                bail!("{SSPASS_HINT}");
-            }
-            // Read the password from the env instead of argv so it never
-            // shows up in the process list.
-            std::process::Command::new("sshpass")
-                .arg("-e")
-                .arg("ssh")
-                .arg(&target)
-                .env("SSHPASS", pw)
-                .status()
-                .context("failed to launch sshpass (is openssh installed?)")?
-        }
-        None => std::process::Command::new("ssh")
-            .arg(&target)
-            .status()
-            .context("failed to launch ssh (is openssh installed?)")?,
+    let session = Session {
+        name: server.name,
+        user: server.user,
+        host: server.host,
+        password,
+        config,
     };
+    session::run(&session)
+}
 
-    if !status.success() {
-        bail!("ssh exited with {}", status);
+/// Show the config path, creating the default file if needed.
+pub fn show_config() -> Result<()> {
+    let path = config::path()?;
+    println!("{} {}", "config:".bold(), path.display().to_string().cyan());
+    if !path.exists() {
+        config::write_default(&path)?;
+        println!("{} wrote default config", "✔".green().bold());
+    }
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+        println!("{}", raw.trim_end());
     }
     Ok(())
 }

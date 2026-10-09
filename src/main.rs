@@ -1,6 +1,10 @@
 mod cli;
 mod commands;
+mod config;
+mod session;
+mod stats;
 mod store;
+mod ui;
 
 use anyhow::Result;
 
@@ -15,6 +19,7 @@ fn main() -> Result<()> {
         Command::List => commands::list(&path),
         Command::Connect { name } => commands::connect(&path, &name),
         Command::Remove { name } => commands::remove(&path, &name),
+        Command::Config => commands::show_config(),
         Command::Help => {
             cli::print_help();
             Ok(())

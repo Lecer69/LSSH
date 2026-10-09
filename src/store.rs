@@ -45,7 +45,8 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn config_path() -> Result<PathBuf> {
+/// Directory holding LSSH configuration, honouring `$XDG_CONFIG_HOME`.
+pub fn config_dir() -> Result<PathBuf> {
     let base = match std::env::var("XDG_CONFIG_HOME") {
         Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => {
@@ -54,7 +55,11 @@ pub fn config_path() -> Result<PathBuf> {
             PathBuf::from(home).join(".config")
         }
     };
-    Ok(base.join("lssh").join("servers.json"))
+    Ok(base.join("lssh"))
+}
+
+pub fn config_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("servers.json"))
 }
 
 pub fn load(path: &PathBuf) -> Result<Vec<Server>> {

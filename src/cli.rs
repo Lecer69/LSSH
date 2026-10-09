@@ -40,6 +40,11 @@ pub fn print_help() {
     );
     println!(
         "  {}          {}",
+        "config".green().bold(),
+        "show the settings file (~/.config/lssh/config.toml)".dimmed()
+    );
+    println!(
+        "  {}          {}",
         "help".green().bold(),
         "show this help".dimmed()
     );
@@ -53,6 +58,7 @@ pub enum Command {
     List,
     Connect { name: String },
     Remove { name: String },
+    Config,
     Help,
 }
 
@@ -78,6 +84,7 @@ pub fn parse_args(args: &[String]) -> Command {
             Some(name) => Command::Remove { name: name.clone() },
             None => Command::Help,
         },
+        "config" | "settings" => Command::Config,
         "help" | "--help" | "-h" => Command::Help,
         // `lssh web` is shorthand for `lssh c web`.
         _ if args.len() == 1 => Command::Connect {
@@ -119,6 +126,7 @@ mod tests {
             parse_args(&args(&["rm", "web"])),
             Command::Remove { name: "web".into() }
         );
+        assert_eq!(parse_args(&args(&["config"])), Command::Config);
     }
 
     #[test]
