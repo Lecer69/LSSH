@@ -16,6 +16,8 @@ pub struct Config {
     pub update_interval_ms: u64,
     /// Number of lines reserved at the bottom for the stats bar (0 disables).
     pub bar_height: u16,
+    /// Blank lines between the shell and the stats bar (0-3).
+    pub bar_spacing: u16,
     /// Colour theme: "btop", "neon" or "mono".
     pub theme: String,
     /// Meter style: "smooth" (partial blocks), "block" or "line".
@@ -43,6 +45,7 @@ impl Default for Config {
         Config {
             update_interval_ms: 1000,
             bar_height: 2,
+            bar_spacing: 1,
             theme: "btop".to_string(),
             bar_style: "smooth".to_string(),
             show_name: true,
@@ -62,6 +65,7 @@ impl Config {
     pub fn normalized(mut self) -> Self {
         self.update_interval_ms = self.update_interval_ms.clamp(200, 60_000);
         self.bar_height = self.bar_height.min(6);
+        self.bar_spacing = self.bar_spacing.min(3);
         if self.theme.trim().is_empty() {
             self.theme = "btop".to_string();
         }
@@ -85,6 +89,9 @@ update_interval_ms = 1000
 # Lines reserved at the bottom for the stats bar.
 # 0 disables the bar entirely (plain ssh, no stats, no scroll region).
 bar_height = 2
+
+# Blank lines between the shell and the stats bar (0-3).
+bar_spacing = 1
 
 # Colour theme: "btop", "neon" or "mono".
 theme = "btop"
@@ -212,12 +219,14 @@ mod tests {
         let cfg = Config {
             update_interval_ms: 5,
             bar_height: 99,
+            bar_spacing: 9,
             theme: "  ".into(),
             ..Config::default()
         }
         .normalized();
         assert_eq!(cfg.update_interval_ms, 200);
         assert_eq!(cfg.bar_height, 6);
+        assert_eq!(cfg.bar_spacing, 3);
         assert_eq!(cfg.theme, "btop");
 
         let cfg = Config {

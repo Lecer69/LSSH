@@ -1,10 +1,12 @@
 mod cli;
 mod commands;
 mod config;
+mod hostkey;
 mod session;
 mod stats;
 mod store;
 mod ui;
+mod vt;
 
 use anyhow::Result;
 

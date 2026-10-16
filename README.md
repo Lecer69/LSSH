@@ -57,6 +57,9 @@ update_interval_ms = 1000
 # 0 disables the bar entirely (plain ssh, no stats, no scroll region).
 bar_height = 2
 
+# Blank lines between the shell and the stats bar (0-3).
+bar_spacing = 1
+
 # Colour theme: "btop", "neon" or "mono".
 theme = "btop"
 
@@ -83,8 +86,10 @@ can never stop a session from starting.
 - `root@host` and `host@root` both work.
 - The stats bar is Linux-oriented (`/proc`). On other remotes the fields it
   cannot read show `n/a`; the shell itself works normally.
-- Full-screen remote apps (vim, htop, ...) can briefly paint over the bar; it
-  is redrawn on the next interval. Set `bar_height = 0` to disable the bar.
+- The bar is redrawn immediately when the remote clears the screen or switches
+  to/from a full-screen app (vim, htop, ...). Set `bar_height = 0` to disable it.
+- On the first connection to a host with a saved password, ssh's own
+  fingerprint prompt is shown before the session starts (sshpass can't answer it).
 - Piping output, running without a TTY, or a terminal shorter than 4 rows falls
   back to a plain `ssh` session.
 
