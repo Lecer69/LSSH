@@ -1,6 +1,6 @@
 # Maintainer: Lecer69 <https://github.com/Lecer69>
 pkgname=lssh
-pkgver=0.3.0
+pkgver=0.3.1
 pkgrel=1
 pkgdesc="Simple SSH server manager with a live stats bar"
 arch=('x86_64')
