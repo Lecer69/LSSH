@@ -12,12 +12,26 @@ sudo install -Dm755 target/release/lssh /usr/local/bin/lssh
 ## Usage
 
 ```bash
-lssh add web root@11.12.13.14   # Add a server
-lssh ls                         # List servers
-lssh web                        # Connect
-lssh rm web                     # Remove
-lssh config                     # Show the settings file
+lssh add web root@11.12.13.14   # save a server
+lssh web                        # connect (same as: lssh connect web / lssh c web)
+lssh list                       # list saved servers (alias: ls)
+lssh passwd web                 # change a server's saved password
+lssh remove web                 # remove a server and its password (alias: rm)
+lssh config                     # show the settings file
+lssh help [command]             # help, overall or for one command
+lssh version                    # print the version
 ```
+
+Mistyped commands print what is wrong and the expected usage, e.g.:
+
+```
+$ lssh add web
+error: missing <user@host>
+  usage: lssh add <name> <user@host>
+```
+
+Output has no colours when piped. Usage errors exit with status 2, other
+failures with 1.
 
 ## Session UI
 
@@ -83,6 +97,7 @@ can never stop a session from starting.
 ## Notes
 
 - Passwords are asked once and stored in your OS keyring (needs `sshpass`).
+  If one changes on the server, update it with `lssh passwd <name>`.
 - `root@host` and `host@root` both work.
 - The stats bar is Linux-oriented (`/proc`). On other remotes the fields it
   cannot read show `n/a`; the shell itself works normally.

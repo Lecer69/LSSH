@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 /// Server metadata. Passwords live in the OS keyring, not here.
@@ -9,6 +9,24 @@ pub struct Server {
     pub name: String,
     pub user: String,
     pub host: String,
+}
+
+impl Server {
+    /// Build a server from a name and a `user@host` (or `host@user`) target.
+    pub fn new(name: &str, target: &str) -> Result<Server> {
+        validate_name(name)?;
+        let (user, host) = parse_target(target)?;
+        Ok(Server {
+            name: name.to_string(),
+            user,
+            host,
+        })
+    }
+
+    /// `user@host`, as passed to ssh.
+    pub fn target(&self) -> String {
+        format!("{}@{}", self.user, self.host)
+    }
 }
 
 /// Parse a target into (user, host).
@@ -42,6 +60,9 @@ pub fn validate_name(name: &str) -> Result<()> {
     {
         bail!("server name must not contain whitespace, '/', '\\' or '@'");
     }
+    if name.starts_with('-') {
+        bail!("server name must not start with '-'");
+    }
     Ok(())
 }
 
@@ -58,34 +79,87 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(base.join("lssh"))
 }
 
-pub fn config_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("servers.json"))
+/// The saved servers, backed by `servers.json`.
+pub struct Store {
+    path: PathBuf,
+    servers: Vec<Server>,
 }
 
-pub fn load(path: &PathBuf) -> Result<Vec<Server>> {
-    if !path.exists() {
-        return Ok(Vec::new());
+impl Store {
+    /// Load the store from its default location.
+    pub fn open() -> Result<Store> {
+        Store::open_at(config_dir()?.join("servers.json"))
     }
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    let servers = serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse {} (corrupted?)", path.display()))?;
-    Ok(servers)
+
+    /// Load the store from `path`; a missing file is an empty store.
+    pub fn open_at(path: PathBuf) -> Result<Store> {
+        let servers = if path.exists() {
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            serde_json::from_str(&raw)
+                .with_context(|| format!("failed to parse {} (corrupted?)", path.display()))?
+        } else {
+            Vec::new()
+        };
+        Ok(Store { path, servers })
+    }
+
+    pub fn servers(&self) -> &[Server] {
+        &self.servers
+    }
+
+    pub fn get(&self, name: &str) -> Result<&Server> {
+        self.servers
+            .iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| not_found(name))
+    }
+
+    pub fn add(&mut self, server: Server) -> Result<()> {
+        if self.servers.iter().any(|s| s.name == server.name) {
+            bail!(
+                "a server named '{name}' already exists\nremove it first with: lssh rm {name}",
+                name = server.name
+            );
+        }
+        self.servers.push(server);
+        Ok(())
+    }
+
+    pub fn remove(&mut self, name: &str) -> Result<Server> {
+        let index = self
+            .servers
+            .iter()
+            .position(|s| s.name == name)
+            .ok_or_else(|| not_found(name))?;
+        Ok(self.servers.remove(index))
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let raw =
+            serde_json::to_string_pretty(&self.servers).context("failed to serialize servers")?;
+        write_private(&self.path, &raw)
+    }
 }
 
-pub fn save(path: &PathBuf, servers: &[Server]) -> Result<()> {
+fn not_found(name: &str) -> anyhow::Error {
+    anyhow!("no server named '{name}'\nsee saved servers with: lssh list")
+}
+
+/// Write `contents` to `path`, readable only by the user: the parent
+/// directory is made 0700 (best effort) and the file 0600.
+pub fn write_private(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            // Keep the config private (best effort).
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
     }
-    let raw = serde_json::to_string_pretty(servers).context("failed to serialize servers")?;
-    std::fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))?;
+    std::fs::write(path, contents)
+        .with_context(|| format!("failed to write {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -137,6 +211,7 @@ mod tests {
         assert!(validate_name("has space").is_err());
         assert!(validate_name("with/slash").is_err());
         assert!(validate_name("with@at").is_err());
+        assert!(validate_name("-flag").is_err());
     }
 
     #[test]
@@ -156,9 +231,13 @@ mod tests {
                 host: "db.local".into(),
             },
         ];
-        save(&path, &servers).unwrap();
-        let loaded = load(&path).unwrap();
-        assert_eq!(loaded, servers);
+        let mut store = Store::open_at(path.clone()).unwrap();
+        for server in &servers {
+            store.add(server.clone()).unwrap();
+        }
+        store.save().unwrap();
+        let loaded = Store::open_at(path.clone()).unwrap();
+        assert_eq!(loaded.servers(), servers);
 
         #[cfg(unix)]
         {
@@ -179,10 +258,10 @@ mod tests {
             r#"[{"name":"web","user":"root","host":"11.12.13.14","password":"secret"}]"#,
         )
         .unwrap();
-        let servers = load(&path).unwrap();
+        let store = Store::open_at(path.clone()).unwrap();
         assert_eq!(
-            servers,
-            vec![Server {
+            store.servers(),
+            [Server {
                 name: "web".into(),
                 user: "root".into(),
                 host: "11.12.13.14".into(),
@@ -195,6 +274,32 @@ mod tests {
     fn load_missing_file_returns_empty() {
         let path = std::env::temp_dir().join("lssh-test-does-not-exist.json");
         let _ = std::fs::remove_file(&path);
-        assert!(load(&path).unwrap().is_empty());
+        assert!(Store::open_at(path).unwrap().servers().is_empty());
+    }
+
+    #[test]
+    fn store_add_get_remove() {
+        let path = std::env::temp_dir().join("lssh-test-never-saved.json");
+        let mut store = Store::open_at(path).unwrap();
+        let web = Server::new("web", "root@11.12.13.14").unwrap();
+
+        store.add(web.clone()).unwrap();
+        assert!(
+            store.add(web.clone()).is_err(),
+            "duplicate names are refused"
+        );
+        assert_eq!(store.get("web").unwrap(), &web);
+        assert!(store.get("db").is_err());
+
+        assert!(store.remove("db").is_err());
+        assert_eq!(store.remove("web").unwrap(), web);
+        assert!(store.servers().is_empty());
+    }
+
+    #[test]
+    fn server_target() {
+        let server = Server::new("web", "11.12.13.14@root").unwrap();
+        assert_eq!(server.target(), "root@11.12.13.14");
+        assert!(Server::new("bad name", "root@host").is_err());
     }
 }

@@ -1,212 +1,162 @@
-use std::path::PathBuf;
+//! One function per CLI command.
 
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 
+use crate::cli;
 use crate::config;
+use crate::out;
+use crate::password;
 use crate::session::{self, Session};
-use crate::store::{self, Server};
+use crate::store::{Server, Store};
 
-pub fn add(path: &PathBuf, name: &str, target: &str) -> Result<()> {
-    store::validate_name(name)?;
-    let (user, host) = store::parse_target(target)?;
-
-    let mut servers = store::load(path)?;
-    if servers.iter().any(|s| s.name == name) {
-        bail!("server '{name}' already exists (use 'lssh rm {name}' first)");
+pub fn add(name: &str, target: &str) -> Result<()> {
+    if cli::find(name).is_some() {
+        bail!("'{name}' is an lssh command, so it can't be used as a server name");
     }
-    servers.push(Server {
-        name: name.to_string(),
-        user,
-        host,
-    });
-    store::save(path, &servers)?;
+    let server = Server::new(name, target)?;
 
-    println!("{} added server '{}'", "✔".green().bold(), name.cyan());
+    let mut store = Store::open()?;
+    store.add(server.clone())?;
+    store.save()?;
+
+    out::success(format_args!(
+        "saved {} {}",
+        out::name(&server),
+        out::target(&server)
+    ));
+    out::hint(format_args!("connect with: lssh {name}"));
     Ok(())
 }
 
-pub fn list(path: &PathBuf) -> Result<()> {
-    let servers = store::load(path)?;
+pub fn list() -> Result<()> {
+    let store = Store::open()?;
+    let servers = store.servers();
     if servers.is_empty() {
-        println!(
-            "{} no servers saved yet, add one with {}",
-            "ℹ".cyan().bold(),
-            "lssh add <name> <user@host>".yellow()
-        );
+        out::info("no servers saved yet");
+        out::hint("add one with: lssh add <name> <user@host>");
         return Ok(());
     }
 
-    println!("{}", "saved servers:".bold());
-    for s in &servers {
-        println!(
-            "  {} {} {}@{}",
-            "•".cyan(),
-            s.name.green().bold(),
-            s.user.yellow(),
-            s.host.blue()
-        );
+    let width = servers
+        .iter()
+        .map(|s| s.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    println!("{}", "Servers".bold());
+    for server in servers {
+        let pad = " ".repeat(width - server.name.chars().count());
+        println!("  {}{pad}   {}", out::name(server), out::target(server));
     }
     Ok(())
 }
 
-/// Check that `sshpass` is installed. ssh only reads passwords from the
-/// TTY, so sshpass is needed to feed it one non-interactively.
-pub(crate) fn sshpass_available() -> bool {
-    std::process::Command::new("sshpass")
-        .arg("-V")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
-}
-
-const KEYRING_SERVICE: &str = "lssh";
-
-/// Read the saved password from the OS keyring. Returns `None` if there is
-/// no entry or the keyring is unavailable (a warning is printed then).
-fn get_saved_password(name: &str) -> Option<String> {
-    let entry = match keyring::Entry::new(KEYRING_SERVICE, name) {
-        Ok(entry) => entry,
-        Err(e) => {
-            println!(
-                "{} could not access the OS keyring: {e} (password will not be restored)",
-                "⚠".yellow().bold()
-            );
-            return None;
-        }
-    };
-    match entry.get_password() {
-        Ok(pw) => Some(pw),
-        Err(keyring::Error::NoEntry) => None,
-        Err(e) => {
-            println!(
-                "{} could not read from the OS keyring: {e} (password will not be restored)",
-                "⚠".yellow().bold()
-            );
-            None
-        }
-    }
-}
-
-/// Save the password in the OS keyring. On failure, warn and only use it
-/// for this connection.
-fn save_password(name: &str, password: &str) {
-    let entry = match keyring::Entry::new(KEYRING_SERVICE, name) {
-        Ok(entry) => entry,
-        Err(e) => {
-            println!(
-                "{} could not access the OS keyring: {e} (password kept for this session only)",
-                "⚠".yellow().bold()
-            );
-            return;
-        }
-    };
-    match entry.set_password(password) {
-        Ok(()) => println!(
-            "{} password saved to the OS keyring (won't ask again)",
-            "✔".green().bold()
-        ),
-        Err(e) => println!(
-            "{} could not save to the OS keyring: {e} (password kept for this session only)",
-            "⚠".yellow().bold()
-        ),
-    }
-}
-
-/// Remove the keyring entry when a server is deleted.
-fn delete_saved_password(name: &str) {
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, name) {
-        let _ = entry.delete_credential();
-    }
-}
-
-pub fn connect(path: &PathBuf, name: &str) -> Result<()> {
-    let servers = store::load(path)?;
-    let server = servers
-        .iter()
-        .find(|s| s.name == name)
-        .with_context(|| {
-            format!(
-                "no server named '{name}' (see 'lssh ls')",
-                name = name.red()
-            )
-        })?
-        .clone();
-
+pub fn connect(name: &str) -> Result<()> {
+    let server = Store::open()?.get(name)?.clone();
     // Load (and create, on first run) the user config.
     let config = config::load();
 
-    println!(
-        "{} connecting to {}@{} ...",
-        "→".cyan().bold(),
-        server.user.yellow(),
-        server.host.blue()
-    );
+    out::step(format_args!(
+        "connecting to {} {}",
+        out::name(&server),
+        out::target(&server)
+    ));
+    let password = session_password(&server)?;
 
-    // Ask for the password if none is saved.
-    let mut password = get_saved_password(name);
-    if password.is_none() {
-        if sshpass_available() {
-            let pw = rpassword::prompt_password(format!(
-                "enter password for {}@{}: ",
-                server.user, server.host
-            ))
-            .context("failed to read password")?;
-            if pw.is_empty() {
-                bail!("empty password, aborting");
-            }
-            save_password(name, &pw);
-            password = Some(pw);
-        } else {
-            println!(
-                "{} {} not installed; ssh will ask for the password and it won't be saved",
-                "ℹ".cyan().bold(),
-                "sshpass".yellow()
-            );
-        }
-    } else if !sshpass_available() {
-        println!(
-            "{} {} not installed; the saved password cannot be replayed, ssh will ask again",
-            "ℹ".cyan().bold(),
-            "sshpass".yellow()
-        );
-    }
-
-    let session = Session {
+    session::run(&Session {
         name: server.name,
         user: server.user,
         host: server.host,
         password,
         config,
-    };
-    session::run(&session)
+    })
 }
 
-/// Show the config path, creating the default file if needed.
+/// The password sshpass should replay: the saved one, or a freshly prompted
+/// one that is then saved. `None` leaves ssh to ask for it itself.
+fn session_password(server: &Server) -> Result<Option<String>> {
+    if !session::sshpass_available() {
+        out::info(format_args!(
+            "{} is not installed, so ssh will ask for the password (it won't be saved)",
+            "sshpass".yellow()
+        ));
+        return Ok(None);
+    }
+
+    match password::get(&server.name) {
+        Ok(Some(saved)) => return Ok(Some(saved)),
+        Ok(None) => {}
+        Err(e) => out::warn(format_args!("{e:#}")),
+    }
+
+    let entered = password::prompt(&format!("password for {}: ", server.target()))?;
+    match password::set(&server.name, &entered) {
+        Ok(()) => out::success("password saved to the OS keyring"),
+        Err(e) => out::warn(format_args!(
+            "{e:#} (the password is used for this session only)"
+        )),
+    }
+    Ok(Some(entered))
+}
+
+pub fn remove(name: &str) -> Result<()> {
+    let mut store = Store::open()?;
+    let server = store.remove(name)?;
+    store.save()?;
+    password::delete(&server.name);
+
+    out::success(format_args!("removed {}", out::name(&server)));
+    Ok(())
+}
+
+pub fn passwd(name: &str) -> Result<()> {
+    let server = Store::open()?.get(name)?.clone();
+    if !session::sshpass_available() {
+        out::warn(format_args!(
+            "{} is not installed, so the saved password won't be used until it is",
+            "sshpass".yellow()
+        ));
+    }
+
+    let entered = password::prompt(&format!("new password for {}: ", server.target()))?;
+    password::set(&server.name, &entered)?;
+
+    out::success(format_args!(
+        "updated the saved password for {}",
+        out::name(&server)
+    ));
+    Ok(())
+}
+
+/// Print the settings file, creating the default one first if needed.
 pub fn show_config() -> Result<()> {
     let path = config::path()?;
-    println!("{} {}", "config:".bold(), path.display().to_string().cyan());
     if !path.exists() {
         config::write_default(&path)?;
-        println!("{} wrote default config", "✔".green().bold());
+        out::success("wrote the default config");
     }
-    if let Ok(raw) = std::fs::read_to_string(&path) {
-        println!("{}", raw.trim_end());
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    println!(
+        "{} {}",
+        "Config".bold(),
+        path.display().to_string().dimmed()
+    );
+    println!();
+    for line in raw.trim_end().lines() {
+        println!("  {}", highlight_toml(line));
     }
     Ok(())
 }
 
-pub fn remove(path: &PathBuf, name: &str) -> Result<()> {
-    let mut servers = store::load(path)?;
-    let original_len = servers.len();
-    servers.retain(|s| s.name != name);
-
-    if servers.len() == original_len {
-        bail!("no server named '{name}' (see 'lssh ls')");
+/// Light syntax colouring for the config file.
+fn highlight_toml(line: &str) -> String {
+    if line.trim_start().starts_with('#') {
+        return line.dimmed().to_string();
     }
-    store::save(path, &servers)?;
-    delete_saved_password(name);
-    println!("{} removed server '{}'", "✔".green().bold(), name.cyan());
-    Ok(())
+    match line.split_once('=') {
+        Some((key, value)) => format!("{}={}", key.cyan(), value.yellow()),
+        None => line.to_string(),
+    }
 }

@@ -10,7 +10,6 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use crossterm::tty::IsTty;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
-use crate::commands::sshpass_available;
 use crate::config::Config;
 use crate::hostkey;
 use crate::stats::{self, Stats};
@@ -22,14 +21,26 @@ pub struct Session {
     pub name: String,
     pub user: String,
     pub host: String,
+    /// Password replayed through sshpass. `None` lets ssh prompt by itself.
     pub password: Option<String>,
     pub config: Config,
+}
+
+/// Check that `sshpass` is installed. ssh only reads passwords from the
+/// TTY, so sshpass is needed to feed it one non-interactively.
+pub fn sshpass_available() -> bool {
+    std::process::Command::new("sshpass")
+        .arg("-V")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
 }
 
 /// Entry point: use the PTY proxy + stats bar when attached to a TTY and the
 /// bar is enabled, otherwise fall back to a plain `ssh` invocation.
 pub fn run(session: &Session) -> Result<()> {
-    let use_sshpass = session.password.is_some() && sshpass_available();
+    let use_sshpass = session.password.is_some();
     let target = format!("{}@{}", session.user, session.host);
     if use_sshpass {
         // sshpass bails out on ssh's "continue connecting?" prompt, so
@@ -297,7 +308,7 @@ pub fn run(session: &Session) -> Result<()> {
     result?;
     if use_sshpass
         && let Some(status) = exit_status
-        && let Some(reason) = sshpass_failure(status.exit_code())
+        && let Some(reason) = sshpass_failure(status.exit_code(), session)
     {
         bail!("{reason}");
     }
@@ -306,14 +317,19 @@ pub fn run(session: &Session) -> Result<()> {
 
 /// Explain sshpass' own exit codes, which otherwise just look like the
 /// session closing immediately.
-fn sshpass_failure(code: u32) -> Option<&'static str> {
+fn sshpass_failure(code: u32, session: &Session) -> Option<String> {
     match code {
-        5 => Some("the saved password was rejected by the server"),
-        6 => Some("the server's host key is unknown and was not confirmed"),
-        7 => Some(
-            "the server's host key has CHANGED; verify it, then remove the old \
-             entry with 'ssh-keygen -R <host>'",
-        ),
+        5 => Some(format!(
+            "the saved password was rejected by the server\n\
+             update it with: lssh passwd {}",
+            session.name
+        )),
+        6 => Some("the server's host key is unknown and was not confirmed".to_string()),
+        7 => Some(format!(
+            "the server's host key has CHANGED\n\
+             verify it, then remove the old entry with: ssh-keygen -R {}",
+            session.host
+        )),
         _ => None,
     }
 }
@@ -485,7 +501,7 @@ fn run_plain(session: &Session, use_sshpass: bool) -> Result<()> {
         && let Some(reason) = status
             .code()
             .and_then(|c| u32::try_from(c).ok())
-            .and_then(sshpass_failure)
+            .and_then(|code| sshpass_failure(code, session))
     {
         bail!("{reason}");
     }
@@ -771,9 +787,25 @@ mod tests {
 
     #[test]
     fn explains_sshpass_exit_codes() {
-        assert!(sshpass_failure(6).is_some());
-        assert!(sshpass_failure(5).is_some());
-        assert!(sshpass_failure(0).is_none());
-        assert!(sshpass_failure(255).is_none());
+        let session = Session {
+            name: "web".into(),
+            user: "root".into(),
+            host: "11.12.13.14".into(),
+            password: None,
+            config: Config::default(),
+        };
+        assert!(
+            sshpass_failure(5, &session)
+                .unwrap()
+                .contains("lssh passwd web")
+        );
+        assert!(sshpass_failure(6, &session).is_some());
+        assert!(
+            sshpass_failure(7, &session)
+                .unwrap()
+                .contains("ssh-keygen -R 11.12.13.14")
+        );
+        assert!(sshpass_failure(0, &session).is_none());
+        assert!(sshpass_failure(255, &session).is_none());
     }
 }

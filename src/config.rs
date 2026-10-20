@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use colored::Colorize;
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::out;
 use crate::store;
 
 /// User-tunable settings loaded from `~/.config/lssh/config.toml`.
@@ -132,11 +132,7 @@ pub fn load() -> Config {
                 path.display()
             ));
         } else {
-            println!(
-                "{} created default config at {}",
-                "✦".cyan().bold(),
-                path.display().to_string().dimmed()
-            );
+            out::success(format_args!("created default config at {}", path.display()));
         }
         return Config::default().normalized();
     }
@@ -157,28 +153,12 @@ pub fn load() -> Config {
 }
 
 fn warn(msg: &str) {
-    eprintln!("{} {msg} (using defaults)", "⚠".yellow().bold());
+    out::warn(format_args!("{msg} (using defaults)"));
 }
 
-/// Create the config directory (0700) and write `DEFAULT_TOML` (0600).
+/// Write `DEFAULT_TOML` to `path`, private to the user.
 pub fn write_default(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-        }
-    }
-    std::fs::write(path, DEFAULT_TOML)
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    store::write_private(path, DEFAULT_TOML)
 }
 
 #[cfg(test)]
