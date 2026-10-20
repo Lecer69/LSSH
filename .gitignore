@@ -2,4 +2,4 @@
 Cargo.lock
 .idea
 /.SRCINFO
-/lssh-0.2.0.tar.gz
+/lssh-*.tar.gz

@@ -1,6 +1,6 @@
 [package]
 name = "lssh"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 resolver = "2"
 description = "Simple terminal SSH server manager"
@@ -18,7 +18,8 @@ colored = "3"
 rpassword = "7"
 keyring = { version = "3", features = ["sync-secret-service"] }
 toml = "1.1"
-crossterm = { version = "0.29", default-features = false }
+crossterm = { version = "0.29", default-features = false, features = ["events"] }
+libc = "0.2"
 portable-pty = "0.9"
 
 [profile.release]

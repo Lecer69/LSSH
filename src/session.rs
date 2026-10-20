@@ -10,51 +10,36 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use crossterm::tty::IsTty;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+use crate::askpass::Askpass;
 use crate::config::Config;
-use crate::hostkey;
+use crate::out;
+use crate::record::Recorder;
 use crate::stats::{self, Stats};
-use crate::ui;
+use crate::store::{self, Server};
+use crate::ui::{self, History};
 use crate::vt;
 
 /// Everything needed to open an interactive session.
 pub struct Session {
-    pub name: String,
-    pub user: String,
-    pub host: String,
-    /// Password replayed through sshpass. `None` lets ssh prompt by itself.
-    pub password: Option<String>,
+    pub server: Server,
     pub config: Config,
-}
-
-/// Check that `sshpass` is installed. ssh only reads passwords from the
-/// TTY, so sshpass is needed to feed it one non-interactively.
-pub fn sshpass_available() -> bool {
-    std::process::Command::new("sshpass")
-        .arg("-V")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
+    /// Save the session as an asciicast recording.
+    pub record: bool,
 }
 
 /// Entry point: use the PTY proxy + stats bar when attached to a TTY and the
 /// bar is enabled, otherwise fall back to a plain `ssh` invocation.
 pub fn run(session: &Session) -> Result<()> {
-    let use_sshpass = session.password.is_some();
-    let target = format!("{}@{}", session.user, session.host);
-    if use_sshpass {
-        // sshpass bails out on ssh's "continue connecting?" prompt, so
-        // settle the host key first while the terminal is still normal.
-        hostkey::ensure_known(&target)?;
-    }
+    let askpass = Askpass::new(&session.server, true)?;
+    let target = session.server.target();
 
     let (cols, rows) = match crossterm::terminal::size() {
         Ok(size) if size.0 > 0 && size.1 > 0 => size,
-        _ => return run_plain(session, use_sshpass),
+        _ => return run_plain(session, &askpass),
     };
     let layout = Layout::new(&session.config, cols, rows);
     if layout.bar_h == 0 || !is_tty() {
-        return run_plain(session, use_sshpass);
+        return run_plain(session, &askpass);
     }
 
     let control_dir = create_control_dir()?;
@@ -72,7 +57,7 @@ pub fn run(session: &Session) -> Result<()> {
         })
         .context("failed to open a pty")?;
 
-    let command = build_command(session, &control_path, use_sshpass);
+    let command = build_command(session, &control_path, &askpass);
     let mut child = pair
         .slave
         .spawn_command(command)
@@ -95,18 +80,38 @@ pub fn run(session: &Session) -> Result<()> {
         }
     };
 
-    let theme = ui::Theme::from_name(&session.config.theme);
-    let render = |layout: &Layout, stats: Option<&Stats>| {
+    let theme = ui::Theme::from_config(&session.config);
+    let address = session.server.address();
+    let info = ui::BarInfo {
+        name: &session.server.name,
+        address: &address,
+    };
+    let render = |layout: &Layout, stats: Option<&Stats>, history: &History| {
         ui::render_bar(
+            &info,
             stats,
-            &session.name,
-            &session.user,
-            &session.host,
+            history,
             layout.cols as usize,
             layout.bar_h as usize,
             &session.config,
             &theme,
         )
+    };
+
+    let mut recording = None;
+    let recorder = if session.record {
+        match Recorder::create(&session.server.name, cols, layout.pty_rows()) {
+            Ok((recorder, path)) => {
+                recording = Some(path);
+                Some(recorder)
+            }
+            Err(e) => {
+                out::warn(format_args!("not recording: {e:#}"));
+                None
+            }
+        }
+    } else {
+        None
     };
 
     // Remote stats poller.
@@ -160,7 +165,11 @@ pub fn run(session: &Session) -> Result<()> {
 
     // All terminal output goes through one lock so a whole bar repaint is
     // written atomically and can never interleave with remote output.
-    let screen = Arc::new(Mutex::new(Screen::new(layout, render(&layout, None))));
+    let screen = Arc::new(Mutex::new(Screen::new(
+        layout,
+        render(&layout, None, &History::default()),
+        recorder,
+    )));
     let guard = TermGuard(Arc::clone(&screen));
 
     // Set up the screen before any remote output is shown, so an early
@@ -168,7 +177,7 @@ pub fn run(session: &Session) -> Result<()> {
     if let Ok(mut s) = screen.lock() {
         let init = format!(
             "\x1b[2J\x1b[H\x1b]2;lssh · {}\x07\x1b[1;{}r",
-            session.name,
+            session.server.name,
             layout.pty_rows()
         );
         let _ = s.out.write_all(init.as_bytes());
@@ -197,12 +206,12 @@ pub fn run(session: &Session) -> Result<()> {
 
     let mut layout = layout;
     let mut stats: Option<Stats> = None;
+    let mut history = History::default();
     let mut pending_fixup = false;
     let mut fixup_waits = 0u32;
     // A cursor report that arrived after we stopped waiting for it must not
     // be forwarded to the remote as keyboard input.
     let mut late_report: Option<Instant> = None;
-    let mut exit_status = None;
 
     let result: Result<()> = (|| -> Result<()> {
         loop {
@@ -221,13 +230,13 @@ pub fn run(session: &Session) -> Result<()> {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
 
-            if let Some(status) = child.try_wait()? {
-                exit_status = Some(status);
+            if child.try_wait()?.is_some() {
                 break;
             }
 
             let mut got_stats = false;
             while let Ok(snapshot) = stats_rx.try_recv() {
+                history.push(&snapshot);
                 stats = Some(snapshot);
                 got_stats = true;
             }
@@ -260,7 +269,7 @@ pub fn run(session: &Session) -> Result<()> {
 
                 s.layout = layout;
                 s.filter.set_pty_rows(layout.pty_rows());
-                s.bar = render(&layout, stats.as_ref());
+                s.bar = render(&layout, stats.as_ref(), &history);
                 let (leftover, answered) = s.fixup(&input_rx)?;
                 drop(s);
                 if !answered {
@@ -276,6 +285,11 @@ pub fn run(session: &Session) -> Result<()> {
                 let new_size = (layout.pty_rows(), layout.cols);
                 if new_size != pty_size {
                     pty_size = new_size;
+                    if let Ok(mut s) = screen.lock()
+                        && let Some(recorder) = s.recorder.as_mut()
+                    {
+                        recorder.resize(new_size.1, new_size.0);
+                    }
                     let _ = master.resize(PtySize {
                         rows: new_size.0,
                         cols: new_size.1,
@@ -286,7 +300,7 @@ pub fn run(session: &Session) -> Result<()> {
             } else {
                 if got_stats {
                     let applied = s.layout;
-                    s.bar = render(&applied, stats.as_ref());
+                    s.bar = render(&applied, stats.as_ref(), &history);
                     s.bar_dirty = true;
                 }
                 s.paint_bar_if_ready()?;
@@ -306,32 +320,14 @@ pub fn run(session: &Session) -> Result<()> {
     drop(guard);
 
     result?;
-    if use_sshpass
-        && let Some(status) = exit_status
-        && let Some(reason) = sshpass_failure(status.exit_code(), session)
-    {
-        bail!("{reason}");
+    if let Some(path) = recording {
+        out::success(format_args!("recorded to {}", path.display()));
+        out::hint(format_args!(
+            "replay with: asciinema play {}",
+            path.display()
+        ));
     }
     Ok(())
-}
-
-/// Explain sshpass' own exit codes, which otherwise just look like the
-/// session closing immediately.
-fn sshpass_failure(code: u32, session: &Session) -> Option<String> {
-    match code {
-        5 => Some(format!(
-            "the saved password was rejected by the server\n\
-             update it with: lssh passwd {}",
-            session.name
-        )),
-        6 => Some("the server's host key is unknown and was not confirmed".to_string()),
-        7 => Some(format!(
-            "the server's host key has CHANGED\n\
-             verify it, then remove the old entry with: ssh-keygen -R {}",
-            session.host
-        )),
-        _ => None,
-    }
 }
 
 /// Screen geometry: shell rows on top, then `gap` blank rows, then the bar.
@@ -381,10 +377,11 @@ struct Screen {
     bar_dirty: bool,
     /// Set by the reader when the remote left the alt screen.
     needs_fixup: bool,
+    recorder: Option<Recorder>,
 }
 
 impl Screen {
-    fn new(layout: Layout, bar: Vec<String>) -> Self {
+    fn new(layout: Layout, bar: Vec<String>, recorder: Option<Recorder>) -> Self {
         Screen {
             out: io::stdout(),
             filter: vt::Filter::new(layout.pty_rows()),
@@ -392,11 +389,15 @@ impl Screen {
             bar,
             bar_dirty: true,
             needs_fixup: false,
+            recorder,
         }
     }
 
     /// Forward remote output, repainting the bar right away if it was erased.
     fn write_remote(&mut self, data: &[u8]) -> io::Result<()> {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.output(data);
+        }
         let mut filtered = Vec::with_capacity(data.len() + 16);
         let ev = self.filter.feed(data, &mut filtered);
         self.out.write_all(&filtered)?;
@@ -482,91 +483,57 @@ fn kill_child(child: &mut PtyChild) {
 }
 
 /// Plain pass-through used when there is no TTY or the bar is disabled.
-fn run_plain(session: &Session, use_sshpass: bool) -> Result<()> {
-    let target = format!("{}@{}", session.user, session.host);
-    let status = match session.password.as_deref() {
-        Some(password) if use_sshpass => std::process::Command::new("sshpass")
-            .arg("-e")
-            .arg("ssh")
-            .arg(&target)
-            .env("SSHPASS", password)
-            .status()
-            .context("failed to launch sshpass (is openssh installed?)")?,
-        _ => std::process::Command::new("ssh")
-            .arg(&target)
-            .status()
-            .context("failed to launch ssh (is openssh installed?)")?,
-    };
-    if use_sshpass
-        && let Some(reason) = status
-            .code()
-            .and_then(|c| u32::try_from(c).ok())
-            .and_then(|code| sshpass_failure(code, session))
-    {
-        bail!("{reason}");
+fn run_plain(session: &Session, askpass: &Askpass) -> Result<()> {
+    if session.record {
+        out::warn("recording needs the stats bar session, so this one is not recorded");
     }
-    if !status.success() {
-        bail!("ssh exited with {status}");
+    let status = askpass
+        .apply(&mut std::process::Command::new("ssh"))
+        .args(session.server.ssh_options())
+        .arg(session.server.target())
+        .status()
+        .context("failed to launch ssh (is openssh installed?)")?;
+    // Other codes are just the remote shell's last exit status.
+    if status.code() == Some(255) {
+        bail!("ssh could not connect to {}", session.server.address());
     }
     Ok(())
 }
 
-/// Build the interactive `ssh` (optionally via `sshpass`) command.
+/// Build the interactive `ssh` command.
 ///
 /// `ControlMaster=yes` turns this session into a multiplexing master so the
 /// stats poller can reuse its authenticated connection.
 fn build_command(
     session: &Session,
     control_path: &std::path::Path,
-    use_sshpass: bool,
+    askpass: &Askpass,
 ) -> CommandBuilder {
-    let target = format!("{}@{}", session.user, session.host);
-    let opts: Vec<String> = vec![
-        "-o".into(),
-        "ControlMaster=yes".into(),
-        "-o".into(),
+    let mut command = CommandBuilder::new("ssh");
+    command.args([
+        "-o".to_string(),
+        "ControlMaster=yes".to_string(),
+        "-o".to_string(),
         format!("ControlPath={}", control_path.display()),
-        "-o".into(),
-        "ServerAliveInterval=30".into(),
-        "-o".into(),
-        "ServerAliveCountMax=3".into(),
-    ];
-
-    let mut command = if use_sshpass {
-        let mut c = CommandBuilder::new("sshpass");
-        c.arg("-e");
-        c.arg("ssh");
-        c.args(opts);
-        c.arg(&target);
-        c
-    } else {
-        let mut command = CommandBuilder::new("ssh");
-        command.args(opts);
-        command.arg(&target);
-        command
-    };
-
-    if let Some(password) = session.password.as_deref() {
-        command.env("SSHPASS", password);
+        "-o".to_string(),
+        "ServerAliveInterval=30".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
+    ]);
+    command.args(session.server.ssh_options());
+    command.arg(session.server.target());
+    for (key, value) in askpass.vars() {
+        command.env(key, value);
     }
     command
 }
 
 fn create_control_dir() -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join(format!("lssh-{}", std::process::id()));
+    let dir = store::runtime_dir().join(format!("lssh-{}", std::process::id()));
     if dir.exists() {
         let _ = std::fs::remove_dir_all(&dir);
     }
-    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
+    store::create_private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -783,29 +750,5 @@ mod tests {
         assert!(s.starts_with("\x1b[?1049l"));
         assert!(s.contains("\x1b[r\x1b[22;1H\x1b[J\x1b8"));
         assert!(!restore_string(&layout(24, 2, 1), false).contains("1049"));
-    }
-
-    #[test]
-    fn explains_sshpass_exit_codes() {
-        let session = Session {
-            name: "web".into(),
-            user: "root".into(),
-            host: "11.12.13.14".into(),
-            password: None,
-            config: Config::default(),
-        };
-        assert!(
-            sshpass_failure(5, &session)
-                .unwrap()
-                .contains("lssh passwd web")
-        );
-        assert!(sshpass_failure(6, &session).is_some());
-        assert!(
-            sshpass_failure(7, &session)
-                .unwrap()
-                .contains("ssh-keygen -R 11.12.13.14")
-        );
-        assert!(sshpass_failure(0, &session).is_none());
-        assert!(sshpass_failure(255, &session).is_none());
     }
 }

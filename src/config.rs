@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::out;
 use crate::store;
+use crate::ui;
 
 /// User-tunable settings loaded from `~/.config/lssh/config.toml`.
 ///
@@ -38,6 +39,52 @@ pub struct Config {
     pub show_load: bool,
     /// Show the remote uptime.
     pub show_uptime: bool,
+    /// Small history graphs next to the CPU and network meters.
+    pub show_sparklines: bool,
+    /// Turn the CPU meter red at this percentage (0 never alerts).
+    pub alert_cpu: u8,
+    /// Turn the memory meter red at this percentage (0 never alerts).
+    pub alert_memory: u8,
+    /// Turn the disk meter red at this percentage (0 never alerts).
+    pub alert_disk: u8,
+    /// Record every session as an asciicast file.
+    pub record: bool,
+    /// Per-colour overrides on top of `theme`.
+    pub colors: Colors,
+}
+
+/// Optional `"#rrggbb"` overrides for the theme colours.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Colors {
+    pub label: Option<String>,
+    pub name: Option<String>,
+    pub cpu: Option<String>,
+    pub mem: Option<String>,
+    pub disk: Option<String>,
+    pub net_down: Option<String>,
+    pub net_up: Option<String>,
+    pub warn: Option<String>,
+    pub crit: Option<String>,
+    pub frame: Option<String>,
+}
+
+impl Colors {
+    /// Every set colour, with its key.
+    pub fn entries(&self) -> [(&'static str, Option<&str>); 10] {
+        [
+            ("label", self.label.as_deref()),
+            ("name", self.name.as_deref()),
+            ("cpu", self.cpu.as_deref()),
+            ("mem", self.mem.as_deref()),
+            ("disk", self.disk.as_deref()),
+            ("net_down", self.net_down.as_deref()),
+            ("net_up", self.net_up.as_deref()),
+            ("warn", self.warn.as_deref()),
+            ("crit", self.crit.as_deref()),
+            ("frame", self.frame.as_deref()),
+        ]
+    }
 }
 
 impl Default for Config {
@@ -56,6 +103,12 @@ impl Default for Config {
             show_network: true,
             show_load: true,
             show_uptime: true,
+            show_sparklines: true,
+            alert_cpu: 85,
+            alert_memory: 85,
+            alert_disk: 90,
+            record: false,
+            colors: Colors::default(),
         }
     }
 }
@@ -66,6 +119,9 @@ impl Config {
         self.update_interval_ms = self.update_interval_ms.clamp(200, 60_000);
         self.bar_height = self.bar_height.min(6);
         self.bar_spacing = self.bar_spacing.min(3);
+        self.alert_cpu = self.alert_cpu.min(100);
+        self.alert_memory = self.alert_memory.min(100);
+        self.alert_disk = self.alert_disk.min(100);
         if self.theme.trim().is_empty() {
             self.theme = "btop".to_string();
         }
@@ -79,7 +135,7 @@ impl Config {
 }
 
 /// The commented default written to disk on first use.
-pub const DEFAULT_TOML: &str = r#"# LSSH configuration
+pub const DEFAULT_TOML: &str = r##"# LSSH configuration
 # This file lives in ~/.config/lssh/config.toml.
 # Delete it to regenerate the defaults.
 
@@ -108,7 +164,26 @@ show_disk = true
 show_network = true
 show_load = true
 show_uptime = true
-"#;
+
+# Small history graphs next to the CPU and network meters.
+show_sparklines = true
+
+# A meter turns red once it reaches this percentage (0 = never).
+alert_cpu = 85
+alert_memory = 85
+alert_disk = 90
+
+# Record every session to ~/.local/share/lssh/recordings as an asciicast
+# file (play one back with `asciinema play <file>`). Without this,
+# `lssh connect <name> --record` records a single session.
+record = false
+
+# Override theme colours with "#rrggbb" values. Keys: label, name, cpu,
+# mem, disk, net_down, net_up, warn, crit, frame.
+[colors]
+# cpu = "#5eebc4"
+# crit = "#ff5555"
+"##;
 
 /// Path to `config.toml`.
 pub fn path() -> Result<PathBuf> {
@@ -138,10 +213,10 @@ pub fn load() -> Config {
     }
 
     match std::fs::read_to_string(&path) {
-        Ok(raw) => match toml::from_str::<Config>(&raw) {
-            Ok(cfg) => cfg.normalized(),
+        Ok(raw) => match parse(&raw) {
+            Ok(cfg) => cfg,
             Err(e) => {
-                warn(&format!("{} is invalid: {e}", path.display()));
+                warn(&format!("{} is invalid: {e:#}", path.display()));
                 Config::default().normalized()
             }
         },
@@ -150,6 +225,19 @@ pub fn load() -> Config {
             Config::default().normalized()
         }
     }
+}
+
+/// Parse and validate config text.
+pub fn parse(raw: &str) -> Result<Config> {
+    let cfg: Config = toml::from_str(raw).context("syntax error")?;
+    for (key, value) in cfg.colors.entries() {
+        if let Some(value) = value
+            && ui::parse_hex(value).is_none()
+        {
+            bail!("colors.{key} = \"{value}\" is not a \"#rrggbb\" colour");
+        }
+    }
+    Ok(cfg.normalized())
 }
 
 fn warn(msg: &str) {
@@ -187,6 +275,20 @@ mod tests {
         assert!(!parsed.show_network);
         assert_eq!(parsed.update_interval_ms, 1000);
         assert!(parsed.show_disk);
+    }
+
+    #[test]
+    fn colors_are_validated() {
+        let cfg = parse("[colors]\ncpu = \"#00ff80\"\n").unwrap();
+        assert_eq!(cfg.colors.cpu.as_deref(), Some("#00ff80"));
+        assert!(parse("[colors]\ncpu = \"green\"\n").is_err());
+        assert!(parse("[colors]\nnope = \"#000000\"\n").is_err());
+    }
+
+    #[test]
+    fn alerts_are_clamped() {
+        let cfg = parse("alert_cpu = 250\n").unwrap();
+        assert_eq!(cfg.alert_cpu, 100);
     }
 
     #[test]
