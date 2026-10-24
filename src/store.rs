@@ -80,7 +80,7 @@ impl Server {
     }
 }
 
-fn bracket_ipv6(host: &str) -> String {
+pub fn bracket_ipv6(host: &str) -> String {
     if host.contains(':') {
         format!("[{host}]")
     } else {
@@ -116,7 +116,7 @@ pub fn parse_target(target: &str) -> Result<(String, String, Option<u16>)> {
 }
 
 /// Split `host:port`, `[ipv6]:port` or a bare host / IPv6 address.
-fn split_port(host: &str) -> Result<(String, Option<u16>)> {
+pub fn split_port(host: &str) -> Result<(String, Option<u16>)> {
     let (host, port) = if let Some(rest) = host.strip_prefix('[') {
         let (inside, after) = rest
             .split_once(']')

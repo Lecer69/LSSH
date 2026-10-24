@@ -54,11 +54,14 @@ lssh list                            # saved servers, most recent first (ls)
 | Setup | |
 |---|---|
 | `config [edit\|path]` | show, edit or locate the settings file |
+| `proxy [set <address>\|unset]` | show, save or remove the proxy used with `-x` |
 | `completions <shell>` | print bash, zsh or fish completions |
 | `help [command]` | help, overall or for one command |
 | `version` | print the version |
 
 `<servers>` is a name, a comma-separated list (`web,db`) or `all`.
+The Remote commands and `copy-id` take `-x` (`--proxy`) to go through the
+saved proxy (see [Proxy](#proxy)).
 `lssh help <command>` shows the details and examples of each command.
 
 ```bash
@@ -95,6 +98,31 @@ Under the hood LSSH is ssh's own `SSH_ASKPASS` helper (OpenSSH 8.4+): ssh asks
 LSSH whenever it needs input. Passwords are answered from the keyring, and
 everything else (new host keys, key passphrases, one-time codes) is shown on
 the terminal just like plain ssh would. No `sshpass` is needed.
+
+## Proxy
+
+LSSH can reach servers through a SOCKS5 or HTTP proxy, such as a local xray
+or v2ray client. Save it once, then add `-x` (`--proxy`) whenever a command
+should go through it:
+
+```bash
+lssh proxy set 127.0.0.1:10808       # socks5:// is assumed; http://host:port works too
+lssh web -x                          # connect through the proxy
+lssh -x                              # pick a server, then connect through the proxy
+lssh run -x all uptime               # run, cp, copy-id, status and top take -x too
+lssh status -x                       # which servers answer through the proxy
+lssh proxy                           # show the saved proxy
+lssh proxy unset                     # forget it
+```
+
+Without `-x` nothing changes, so servers on your LAN stay direct. The proxy is
+saved as `proxy` in `config.toml`.
+
+LSSH is its own `ProxyCommand`, the same way it is its own askpass helper: it
+does what `ssh -o ProxyCommand="nc -X 5 -x 127.0.0.1:10808 %h %p"` does,
+without needing netcat. Host names are resolved by the proxy, and the stats bar
+shares the proxied connection. Proxies that need a username and password are
+not supported.
 
 ## Session UI
 
@@ -175,6 +203,11 @@ alert_disk = 90
 
 # Record every session (see Recording above).
 record = false
+
+# Proxy for commands run with -x (lssh <name> -x), e.g. a local xray or
+# v2ray client: "socks5://host:port" (or just "host:port") or
+# "http://host:port". Set it with `lssh proxy set <address>`.
+# proxy = "socks5://127.0.0.1:10808"
 
 # Override theme colours with "#rrggbb" values. Keys: label, name, cpu,
 # mem, disk, net_down, net_up, warn, crit, frame.

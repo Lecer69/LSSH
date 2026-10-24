@@ -22,6 +22,7 @@ use crossterm::{cursor, queue};
 use crate::askpass::Askpass;
 use crate::config::Config;
 use crate::out;
+use crate::proxy::{self, Proxy};
 use crate::stats::{self, Collector, Stats};
 use crate::store::{self, Server};
 use crate::tui::{self, FullScreen};
@@ -46,10 +47,11 @@ struct Host {
     history: History,
 }
 
-pub fn run(servers: Vec<Server>, config: Config) -> Result<()> {
+pub fn run(servers: Vec<Server>, config: Config, proxy: Option<&Proxy>) -> Result<()> {
     if !out::interactive() {
         bail!("lssh top needs a terminal");
     }
+    let proxy_options = proxy::ssh_options(proxy)?;
     let dir = store::runtime_dir().join(format!("lssh-top-{}", std::process::id()));
     store::create_private_dir(&dir)?;
 
@@ -64,6 +66,7 @@ pub fn run(servers: Vec<Server>, config: Config) -> Result<()> {
                 index,
                 server: server.clone(),
                 socket: dir.join(index.to_string()),
+                proxy_options: proxy_options.clone(),
                 interval,
                 stop: Arc::clone(&stop),
                 updates: tx.clone(),
@@ -220,6 +223,8 @@ struct Worker {
     index: usize,
     server: Server,
     socket: PathBuf,
+    /// `-o ProxyCommand=...`, or nothing for a direct connection.
+    proxy_options: Vec<String>,
     interval: Duration,
     stop: Arc<AtomicBool>,
     updates: Sender<Update>,
@@ -291,6 +296,7 @@ impl Worker {
                 "LogLevel=ERROR",
             ])
             .args(self.server.ssh_options())
+            .args(&self.proxy_options)
             .arg(self.server.target())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -316,6 +322,12 @@ fn explain(server: &Server, stderr: &str, status: &str) -> String {
         format!("✖ no saved password or key · connect once with: lssh {name}")
     } else if stderr.contains("Host key verification failed") {
         format!("✖ host key not trusted yet · connect once with: lssh {name}")
+    } else if let Some(reason) = stderr
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("lssh: "))
+    {
+        // The proxy helper knows better than ssh what went wrong.
+        format!("✖ {reason}")
     } else {
         let last = stderr
             .lines()
@@ -357,6 +369,15 @@ mod tests {
         assert_eq!(
             explain(&server, "", "exit status: 1"),
             "✖ ssh exited (exit status: 1)"
+        );
+        assert_eq!(
+            explain(
+                &server,
+                "lssh: could not reach the proxy at 127.0.0.1:1080: connection refused\n\
+                 Connection closed by UNKNOWN port 65535\n",
+                ""
+            ),
+            "✖ could not reach the proxy at 127.0.0.1:1080: connection refused"
         );
     }
 

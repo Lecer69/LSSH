@@ -1,7 +1,7 @@
 //! Styled terminal messages, so every command speaks with the same voice.
 
 use std::fmt::{self, Display};
-use std::io::IsTerminal;
+use std::io::{self, ErrorKind, IsTerminal};
 
 use colored::Colorize;
 
@@ -91,6 +91,16 @@ pub fn ago(when: Option<u64>, now: u64) -> String {
         3_600..86_400 => format!("{}h ago", secs / 3_600),
         _ if secs < 60 * 86_400 => format!("{}d ago", secs / 86_400),
         _ => format!("{}mo ago", secs / (30 * 86_400)),
+    }
+}
+
+/// Why a connection failed, in a few words: `connection refused`, ...
+pub fn connect_error(e: &io::Error) -> String {
+    match e.kind() {
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => "timed out".to_string(),
+        ErrorKind::ConnectionRefused => "connection refused".to_string(),
+        ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => "unreachable".to_string(),
+        _ => e.to_string(),
     }
 }
 

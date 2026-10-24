@@ -1,7 +1,7 @@
 //! Commands that work with servers without an interactive session:
 //! `run`, `cp`, `copy-id` and `status`.
 
-use std::io::{BufRead, BufReader, ErrorKind, IsTerminal, Read};
+use std::io::{BufRead, BufReader, IsTerminal, Read};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,6 +14,7 @@ use colored::{Color, Colorize};
 use crate::askpass::Askpass;
 use crate::out::{self, Exit};
 use crate::password;
+use crate::proxy::{self, Proxy};
 use crate::store::{self, Server, Store};
 
 /// Colours that tell servers apart in `run` output.
@@ -26,28 +27,30 @@ const LABEL_COLORS: [Color; 6] = [
     Color::BrightRed,
 ];
 
-fn ssh(server: &Server, askpass: &Askpass) -> Command {
+fn ssh(server: &Server, askpass: &Askpass, proxy_options: &[String]) -> Command {
     let mut command = Command::new("ssh");
     askpass.apply(&mut command);
     command
         .args(["-o", "ConnectTimeout=10"])
-        .args(server.ssh_options());
+        .args(server.ssh_options())
+        .args(proxy_options);
     command
 }
 
-pub fn run(servers: &str, command: &[String]) -> Result<()> {
+pub fn run(servers: &str, command: &[String], use_proxy: bool) -> Result<()> {
     let servers = Store::open()?.select(servers)?;
+    let proxy_options = proxy::ssh_options(proxy::resolve(use_proxy)?.as_ref())?;
     let remote = command.join(" ");
     match servers.as_slice() {
-        [server] => run_one(server, &remote),
-        _ => run_many(&servers, &remote),
+        [server] => run_one(server, &remote, &proxy_options),
+        _ => run_many(&servers, &remote, &proxy_options),
     }
 }
 
 /// Run on one server with the terminal attached; its exit status is ours.
-fn run_one(server: &Server, remote: &str) -> Result<()> {
+fn run_one(server: &Server, remote: &str, proxy_options: &[String]) -> Result<()> {
     let askpass = Askpass::new(server, true)?;
-    let mut command = ssh(server, &askpass);
+    let mut command = ssh(server, &askpass, proxy_options);
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         // A tty lets interactive commands (top, sudo, ...) work.
         command.arg("-t");
@@ -66,7 +69,7 @@ fn run_one(server: &Server, remote: &str) -> Result<()> {
 }
 
 /// Run on several servers at once, prefixing every output line.
-fn run_many(servers: &[Server], remote: &str) -> Result<()> {
+fn run_many(servers: &[Server], remote: &str, proxy_options: &[String]) -> Result<()> {
     let width = servers
         .iter()
         .map(|s| s.name.chars().count())
@@ -79,6 +82,7 @@ fn run_many(servers: &[Server], remote: &str) -> Result<()> {
         .map(|(i, server)| {
             let server = server.clone();
             let remote = remote.to_string();
+            let proxy_options = proxy_options.to_vec();
             let pad = " ".repeat(width - server.name.chars().count());
             let label = format!("{}{pad} │", server.name)
                 .color(LABEL_COLORS[i % LABEL_COLORS.len()])
@@ -87,7 +91,7 @@ fn run_many(servers: &[Server], remote: &str) -> Result<()> {
                 // Prompts from several servers at once would garble the
                 // terminal, so only saved passwords and keys are used.
                 let askpass = Askpass::new(&server, false)?;
-                let mut child = ssh(&server, &askpass)
+                let mut child = ssh(&server, &askpass, &proxy_options)
                     .arg(server.target())
                     .arg(&remote)
                     .stdin(Stdio::null())
@@ -176,7 +180,7 @@ fn prefix_lines(stream: impl Read, label: &str, stderr: bool) -> bool {
     denied
 }
 
-pub fn cp(from: &str, to: &str, recursive: bool) -> Result<()> {
+pub fn cp(from: &str, to: &str, recursive: bool, use_proxy: bool) -> Result<()> {
     let store = Store::open()?;
     let (server, source, destination) = match (on_server(&store, from), on_server(&store, to)) {
         (Some((server, path)), None) => (server, server.scp_path(path), to.to_string()),
@@ -190,6 +194,7 @@ pub fn cp(from: &str, to: &str, recursive: bool) -> Result<()> {
         ),
     };
 
+    let proxy_options = proxy::ssh_options(proxy::resolve(use_proxy)?.as_ref())?;
     let askpass = Askpass::new(server, true)?;
     let mut command = Command::new("scp");
     askpass.apply(&mut command);
@@ -198,6 +203,7 @@ pub fn cp(from: &str, to: &str, recursive: bool) -> Result<()> {
     }
     let status = command
         .args(server.ssh_options())
+        .args(&proxy_options)
         .arg(&source)
         .arg(&destination)
         .status()
@@ -215,9 +221,10 @@ fn on_server<'a>(store: &'a Store, spec: &'a str) -> Option<(&'a Server, &'a str
     Some((store.get(name).ok()?, path))
 }
 
-pub fn copy_id(name: &str, key: Option<&str>, keep_password: bool) -> Result<()> {
+pub fn copy_id(name: &str, key: Option<&str>, keep_password: bool, use_proxy: bool) -> Result<()> {
     let mut store = Store::open()?;
     let server = store.get(name)?.clone();
+    let proxy_options = proxy::ssh_options(proxy::resolve(use_proxy)?.as_ref())?;
     let private = match (key, &server.identity) {
         (Some(key), _) => store::expand_path(key)?,
         (None, Some(identity)) => identity.clone(),
@@ -244,6 +251,7 @@ pub fn copy_id(name: &str, key: Option<&str>, keep_password: bool) -> Result<()>
         .arg("-i")
         .arg(&public)
         .args(port_option(&server))
+        .args(&proxy_options)
         .arg(server.target())
         .status()
         .context("failed to launch ssh-copy-id (is openssh installed?)")?;
@@ -252,7 +260,7 @@ pub fn copy_id(name: &str, key: Option<&str>, keep_password: bool) -> Result<()>
     }
 
     // Only give up the password once the key is known to work.
-    if !key_login_works(&server, &private) {
+    if !key_login_works(&server, &private, &proxy_options) {
         out::warn("the key was installed, but logging in with it did not work");
         out::hint("the saved password is kept; a passphrase-protected key needs ssh-agent");
         return Ok(());
@@ -283,7 +291,7 @@ fn port_option(server: &Server) -> Vec<String> {
     }
 }
 
-fn key_login_works(server: &Server, private: &Path) -> bool {
+fn key_login_works(server: &Server, private: &Path, proxy_options: &[String]) -> bool {
     Command::new("ssh")
         .args([
             "-o",
@@ -300,6 +308,7 @@ fn key_login_works(server: &Server, private: &Path) -> bool {
         .arg("-i")
         .arg(private)
         .args(port_option(server))
+        .args(proxy_options)
         .arg(server.target())
         .arg("true")
         .stdin(Stdio::null())
@@ -347,6 +356,8 @@ fn newest_key() -> Result<PathBuf> {
 }
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Each step through a proxy may take this long: it adds a hop or two.
+const PROXIED_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A reachable SSH port.
 struct Probe {
@@ -355,12 +366,19 @@ struct Probe {
     banner: Option<String>,
 }
 
-pub fn status(servers: Option<&str>) -> Result<()> {
+pub fn status(servers: Option<&str>, use_proxy: bool) -> Result<()> {
     let servers = Store::open()?.select(servers.unwrap_or("all"))?;
+    let proxy = proxy::resolve(use_proxy)?;
     let probes: Vec<_> = servers
         .iter()
         .cloned()
-        .map(|server| thread::spawn(move || probe(&server)))
+        .map(|server| {
+            let proxy = proxy.clone();
+            thread::spawn(move || match proxy {
+                Some(proxy) => probe_through(&server, &proxy),
+                None => probe(&server),
+            })
+        })
         .collect();
 
     let width = servers
@@ -414,27 +432,38 @@ fn probe(server: &Server) -> Result<Probe> {
                 let latency = start.elapsed();
                 return Ok(Probe {
                     latency,
-                    banner: read_banner(stream),
+                    banner: read_banner(stream, PROBE_TIMEOUT),
                 });
             }
             Err(e) => last_error = Some(e),
         }
     }
-    let reason = match last_error {
-        None => "host has no address".to_string(),
-        Some(e) => match e.kind() {
-            ErrorKind::TimedOut | ErrorKind::WouldBlock => "timed out".to_string(),
-            ErrorKind::ConnectionRefused => "connection refused".to_string(),
-            ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => "unreachable".to_string(),
-            _ => e.to_string(),
-        },
-    };
-    bail!("{reason}")
+    match last_error {
+        None => bail!("host has no address"),
+        Some(e) => bail!("{}", out::connect_error(&e)),
+    }
+}
+
+/// Probe through the proxy. Proxies like xray accept a tunnel before they
+/// have reached the server, so the server's banner is what's timed.
+fn probe_through(server: &Server, proxy: &Proxy) -> Result<Probe> {
+    let start = Instant::now();
+    let stream = proxy.connect(
+        &server.host,
+        server.port_or_default(),
+        PROXIED_PROBE_TIMEOUT,
+    )?;
+    let banner =
+        read_banner(stream, PROXIED_PROBE_TIMEOUT).context("no answer through the proxy")?;
+    Ok(Probe {
+        latency: start.elapsed(),
+        banner: Some(banner),
+    })
 }
 
 /// The first line an SSH server sends: `SSH-2.0-<software>`.
-fn read_banner(stream: TcpStream) -> Option<String> {
-    stream.set_read_timeout(Some(PROBE_TIMEOUT)).ok()?;
+fn read_banner(stream: TcpStream, timeout: Duration) -> Option<String> {
+    stream.set_read_timeout(Some(timeout)).ok()?;
     let mut line = Vec::new();
     BufReader::new(stream.take(255))
         .read_until(b'\n', &mut line)
@@ -483,6 +512,39 @@ mod tests {
         let server = Server::new("local", &format!("me@127.0.0.1:{port}")).unwrap();
         let error = probe(&server).err().unwrap();
         assert_eq!(error.to_string(), "connection refused");
+    }
+
+    /// A SOCKS5 proxy that takes one tunnel to an IPv4 address, then sends
+    /// `reply` as if it came from the server.
+    fn fake_socks5(reply: &'static [u8]) -> (Proxy, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut greeting = [0u8; 3];
+            socket.read_exact(&mut greeting).unwrap();
+            socket.write_all(&[5, 0]).unwrap();
+            let mut request = [0u8; 10];
+            socket.read_exact(&mut request).unwrap();
+            socket.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+            socket.write_all(reply).unwrap();
+        });
+        (Proxy::parse(&format!("127.0.0.1:{port}")).unwrap(), handle)
+    }
+
+    #[test]
+    fn probe_goes_through_the_proxy() {
+        let server = Server::new("web", "me@10.0.0.1").unwrap();
+        let (proxy, fake) = fake_socks5(b"SSH-2.0-OpenSSH_9.6\r\n");
+        let probe = probe_through(&server, &proxy).unwrap();
+        assert_eq!(probe.banner.as_deref(), Some("OpenSSH_9.6"));
+        fake.join().unwrap();
+
+        // xray accepts every tunnel; one that leads nowhere just closes.
+        let (proxy, fake) = fake_socks5(b"");
+        let error = probe_through(&server, &proxy).err().unwrap();
+        assert_eq!(error.to_string(), "no answer through the proxy");
+        fake.join().unwrap();
     }
 
     #[test]

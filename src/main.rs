@@ -7,6 +7,7 @@ mod import;
 mod out;
 mod password;
 mod picker;
+mod proxy;
 mod record;
 mod remote;
 mod session;
@@ -31,6 +32,11 @@ fn main() -> ExitCode {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
+    // ssh runs lssh as its ProxyCommand to go through a proxy. That process
+    // inherits the askpass variables too, so this is checked first.
+    if proxy::invoked() {
+        return proxy::main();
+    }
     // ssh runs lssh as its SSH_ASKPASS helper to ask for passwords.
     if askpass::invoked() {
         return askpass::main();
@@ -59,7 +65,7 @@ fn main() -> ExitCode {
 
 fn run(command: Command) -> Result<()> {
     match command {
-        Command::Pick => commands::pick(),
+        Command::Pick { proxy } => commands::pick(proxy),
         Command::Add { name, target, key } => commands::add(&name, &target, key.as_deref()),
         Command::Import { file } => commands::import(file.as_deref()),
         Command::List { names_only } => commands::list(names_only),
@@ -70,17 +76,30 @@ fn run(command: Command) -> Result<()> {
             name,
             key,
             keep_password,
-        } => remote::copy_id(&name, key.as_deref(), keep_password),
-        Command::Connect { name, record } => commands::connect(&name, record),
-        Command::Run { servers, command } => remote::run(&servers, &command),
+            proxy,
+        } => remote::copy_id(&name, key.as_deref(), keep_password, proxy),
+        Command::Connect {
+            name,
+            record,
+            proxy,
+        } => commands::connect(&name, record, proxy),
+        Command::Run {
+            servers,
+            command,
+            proxy,
+        } => remote::run(&servers, &command, proxy),
         Command::Cp {
             from,
             to,
             recursive,
-        } => remote::cp(&from, &to, recursive),
-        Command::Status { servers } => remote::status(servers.as_deref()),
-        Command::Top { servers } => commands::top(servers.as_deref()),
+            proxy,
+        } => remote::cp(&from, &to, recursive, proxy),
+        Command::Status { servers, proxy } => remote::status(servers.as_deref(), proxy),
+        Command::Top { servers, proxy } => commands::top(servers.as_deref(), proxy),
         Command::Config { action } => commands::config(action.as_deref()),
+        Command::Proxy { action, address } => {
+            commands::proxy(action.as_deref(), address.as_deref())
+        }
         Command::Completions { shell } => commands::completions(&shell),
         Command::Help { topic } => cli::help(topic.as_deref()),
         Command::Version => {

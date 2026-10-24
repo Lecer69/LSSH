@@ -14,19 +14,22 @@ use crate::import;
 use crate::out;
 use crate::password;
 use crate::picker;
+use crate::proxy::{self, Proxy};
 use crate::session::{self, Session};
 use crate::store::{self, Server, Store};
 use crate::top;
 
 /// Plain `lssh`: choose a server from a list, or show help when there is
 /// nothing to choose from (or no terminal to choose on).
-pub fn pick() -> Result<()> {
+pub fn pick(use_proxy: bool) -> Result<()> {
     let store = Store::open()?;
     if store.servers().is_empty() || !out::interactive() {
         return cli::help(None);
     }
+    // Rather say that no proxy is set before a server is chosen than after.
+    proxy::resolve(use_proxy)?;
     match picker::pick(&store.by_recent())? {
-        Some(name) => connect(&name, false),
+        Some(name) => connect(&name, false, use_proxy),
         None => Ok(()),
     }
 }
@@ -191,7 +194,7 @@ fn column_width(widths: impl Iterator<Item = usize>) -> usize {
     widths.max().unwrap_or(0)
 }
 
-pub fn connect(name: &str, record: bool) -> Result<()> {
+pub fn connect(name: &str, record: bool, use_proxy: bool) -> Result<()> {
     let mut store = Store::open()?;
     let server = if name == "-" {
         store.last_used()?
@@ -199,13 +202,18 @@ pub fn connect(name: &str, record: bool) -> Result<()> {
         store.get(name)?
     }
     .clone();
+    let proxy = proxy::resolve(use_proxy)?;
     store.touch(&server.name)?;
     store.save()?;
 
     // Load (and create, on first run) the user config.
     let config = config::load();
+    let via = match &proxy {
+        Some(proxy) => format!(" via {proxy}").dimmed().to_string(),
+        None => String::new(),
+    };
     out::step(format_args!(
-        "connecting to {} {}",
+        "connecting to {} {}{via}",
         out::name(&server),
         out::target(&server)
     ));
@@ -213,6 +221,7 @@ pub fn connect(name: &str, record: bool) -> Result<()> {
         record: record || config.record,
         server,
         config,
+        proxy,
     })
 }
 
@@ -257,9 +266,10 @@ pub fn passwd(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn top(servers: Option<&str>) -> Result<()> {
+pub fn top(servers: Option<&str>, use_proxy: bool) -> Result<()> {
     let servers = Store::open()?.select(servers.unwrap_or("all"))?;
-    top::run(servers, config::load())
+    let proxy = proxy::resolve(use_proxy)?;
+    top::run(servers, config::load(), proxy.as_ref())
 }
 
 pub fn completions(shell: &str) -> Result<()> {
@@ -281,6 +291,52 @@ pub fn config(action: Option<&str>) -> Result<()> {
              use: lssh config, lssh config edit or lssh config path"
         ),
     }
+}
+
+/// `lssh proxy [set <address>|unset]`.
+pub fn proxy(action: Option<&str>, address: Option<&str>) -> Result<()> {
+    match (action, address) {
+        (None, _) => show_proxy(),
+        (Some("set"), Some(address)) => {
+            let proxy = Proxy::parse(address)?;
+            config::set_proxy(Some(&proxy.to_string()))?;
+            out::success(format_args!("saved proxy {proxy}"));
+            out::hint("use it with: lssh <name> -x");
+            Ok(())
+        }
+        (Some("set"), None) => bail!("missing <address>\nusage: lssh proxy set <host:port>"),
+        (Some("unset"), None) => {
+            match config::set_proxy(None)? {
+                Some(previous) => out::success(format_args!("removed proxy {previous}")),
+                None => out::info("no proxy was set"),
+            }
+            Ok(())
+        }
+        (Some("unset"), Some(extra)) => {
+            bail!("unexpected argument '{extra}'\nusage: lssh proxy unset")
+        }
+        (Some(other), _) if Proxy::parse(other).is_ok() => {
+            bail!("unknown proxy action '{other}'\nto save it as the proxy: lssh proxy set {other}")
+        }
+        (Some(other), _) => bail!(
+            "unknown proxy action '{other}'\n\
+             use: lssh proxy, lssh proxy set <address> or lssh proxy unset"
+        ),
+    }
+}
+
+fn show_proxy() -> Result<()> {
+    match config::load().proxy {
+        Some(proxy) => {
+            out::info(format_args!("proxy {}", Proxy::parse(&proxy)?));
+            out::hint("used by commands given -x, e.g. lssh <name> -x");
+        }
+        None => {
+            out::info("no proxy set");
+            out::hint("set one with: lssh proxy set <host:port>");
+        }
+    }
+    Ok(())
 }
 
 fn ensure_config(path: &Path) -> Result<()> {

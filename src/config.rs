@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::out;
+use crate::proxy::Proxy;
 use crate::store;
 use crate::ui;
 
@@ -49,6 +50,8 @@ pub struct Config {
     pub alert_disk: u8,
     /// Record every session as an asciicast file.
     pub record: bool,
+    /// Proxy for commands run with `-x`, e.g. "socks5://127.0.0.1:10808".
+    pub proxy: Option<String>,
     /// Per-colour overrides on top of `theme`.
     pub colors: Colors,
 }
@@ -108,6 +111,7 @@ impl Default for Config {
             alert_memory: 85,
             alert_disk: 90,
             record: false,
+            proxy: None,
             colors: Colors::default(),
         }
     }
@@ -124,6 +128,9 @@ impl Config {
         self.alert_disk = self.alert_disk.min(100);
         if self.theme.trim().is_empty() {
             self.theme = "btop".to_string();
+        }
+        if self.proxy.as_deref().is_some_and(|p| p.trim().is_empty()) {
+            self.proxy = None;
         }
         self.bar_style = match self.bar_style.trim().to_ascii_lowercase().as_str() {
             "block" => "block".to_string(),
@@ -178,6 +185,11 @@ alert_disk = 90
 # `lssh connect <name> --record` records a single session.
 record = false
 
+# Proxy for commands run with -x (lssh <name> -x), e.g. a local xray or
+# v2ray client: "socks5://host:port" (or just "host:port") or
+# "http://host:port". Set it with `lssh proxy set <address>`.
+# proxy = "socks5://127.0.0.1:10808"
+
 # Override theme colours with "#rrggbb" values. Keys: label, name, cpu,
 # mem, disk, net_down, net_up, warn, crit, frame.
 [colors]
@@ -229,7 +241,9 @@ pub fn load() -> Config {
 
 /// Parse and validate config text.
 pub fn parse(raw: &str) -> Result<Config> {
-    let cfg: Config = toml::from_str(raw).context("syntax error")?;
+    let cfg = toml::from_str::<Config>(raw)
+        .context("syntax error")?
+        .normalized();
     for (key, value) in cfg.colors.entries() {
         if let Some(value) = value
             && ui::parse_hex(value).is_none()
@@ -237,7 +251,12 @@ pub fn parse(raw: &str) -> Result<Config> {
             bail!("colors.{key} = \"{value}\" is not a \"#rrggbb\" colour");
         }
     }
-    Ok(cfg.normalized())
+    if let Some(proxy) = &cfg.proxy
+        && Proxy::parse(proxy).is_err()
+    {
+        bail!("proxy = \"{proxy}\" is not a proxy address like socks5://host:port");
+    }
+    Ok(cfg)
 }
 
 fn warn(msg: &str) {
@@ -247,6 +266,98 @@ fn warn(msg: &str) {
 /// Write `DEFAULT_TOML` to `path`, private to the user.
 pub fn write_default(path: &Path) -> Result<()> {
     store::write_private(path, DEFAULT_TOML)
+}
+
+/// Save `proxy` as the `proxy` setting, or comment it out with `None`,
+/// keeping the rest of config.toml as it is. Returns the proxy that was
+/// set before.
+pub fn set_proxy(proxy: Option<&str>) -> Result<Option<String>> {
+    set_proxy_at(&path()?, proxy)
+}
+
+fn set_proxy_at(path: &Path, proxy: Option<&str>) -> Result<Option<String>> {
+    if !path.exists() {
+        write_default(path)?;
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let previous = toml::from_str::<toml::Table>(&raw)
+        .ok()
+        .and_then(|table| table.get("proxy")?.as_str().map(String::from))
+        .filter(|proxy| !proxy.trim().is_empty());
+
+    let updated = with_proxy(&raw, proxy);
+    if let Err(e) = parse(&updated) {
+        bail!(
+            "{} is invalid: {e:#}\nfix it with: lssh config edit",
+            path.display()
+        );
+    }
+    if updated != raw {
+        store::write_private(path, &updated)?;
+    }
+    Ok(previous)
+}
+
+/// Introduces a `proxy` line added to a config that had none.
+const PROXY_COMMENT: &str = "# Proxy for commands run with -x; see: lssh help proxy";
+
+/// Config text with its `proxy` line set to `proxy`, or commented out.
+/// A commented-out `# proxy = ...` line is reused, so switching the proxy
+/// on and off leaves a single line.
+fn with_proxy(raw: &str, proxy: Option<&str>) -> String {
+    let mut lines: Vec<String> = raw.lines().map(String::from).collect();
+    // Top-level keys come before the first [table].
+    let top = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let active = lines[..top].iter().position(|line| sets_proxy(line));
+    let commented = lines[..top]
+        .iter()
+        .position(|line| line.trim_start().strip_prefix('#').is_some_and(sets_proxy));
+
+    match proxy {
+        Some(proxy) => {
+            let line = format!("proxy = {}", toml::Value::String(proxy.to_string()));
+            match active.or(commented) {
+                Some(i) => lines[i] = line,
+                None if top == lines.len() => {
+                    if lines.last().is_some_and(|last| !last.trim().is_empty()) {
+                        lines.push(String::new());
+                    }
+                    lines.extend([PROXY_COMMENT.to_string(), line]);
+                }
+                None => {
+                    // Above the comments that introduce the first table.
+                    let mut at = top;
+                    while at > 0 && lines[at - 1].trim_start().starts_with('#') {
+                        at -= 1;
+                    }
+                    let mut block = vec![PROXY_COMMENT.to_string(), line, String::new()];
+                    if at > 0 && !lines[at - 1].trim().is_empty() {
+                        block.insert(0, String::new());
+                    }
+                    lines.splice(at..at, block);
+                }
+            }
+        }
+        None => {
+            if let Some(i) = active {
+                lines[i] = format!("# {}", lines[i].trim_start());
+            }
+        }
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    text
+}
+
+/// Whether a line sets the proxy: `proxy = ...`.
+fn sets_proxy(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix("proxy")
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
 }
 
 #[cfg(test)]
@@ -334,6 +445,88 @@ mod tests {
         }
         .normalized();
         assert_eq!(cfg.bar_style, "smooth");
+    }
+
+    #[test]
+    fn proxy_is_validated() {
+        let cfg = parse("proxy = \"127.0.0.1:1080\"\n").unwrap();
+        assert_eq!(cfg.proxy.as_deref(), Some("127.0.0.1:1080"));
+        assert!(parse("proxy = \"nope\"\n").is_err());
+        assert_eq!(parse("proxy = \" \"\n").unwrap().proxy, None);
+    }
+
+    #[test]
+    fn proxy_line_is_edited_in_place() {
+        // The commented example in the default config becomes the setting.
+        let set = with_proxy(DEFAULT_TOML, Some("socks5://127.0.0.1:10808"));
+        assert_eq!(set.lines().count(), DEFAULT_TOML.lines().count());
+        assert!(set.contains("\nproxy = \"socks5://127.0.0.1:10808\"\n"));
+        assert_eq!(
+            parse(&set).unwrap().proxy.as_deref(),
+            Some("socks5://127.0.0.1:10808")
+        );
+
+        // Changing it replaces the line, unsetting comments it out, and
+        // setting it again reuses that line.
+        let changed = with_proxy(&set, Some("http://[::1]:8080"));
+        assert_eq!(changed.lines().count(), DEFAULT_TOML.lines().count());
+        let unset = with_proxy(&changed, None);
+        assert!(unset.contains("\n# proxy = \"http://[::1]:8080\"\n"));
+        assert_eq!(parse(&unset).unwrap(), Config::default());
+        assert_eq!(with_proxy(&unset, None), unset);
+        assert_eq!(with_proxy(&unset, Some("http://[::1]:8080")), changed);
+    }
+
+    #[test]
+    fn proxy_line_is_added_to_older_configs() {
+        let line = "proxy = \"socks5://h:1080\"";
+        let old = "bar_height = 3\n\n# Colours.\n[colors]\ncpu = \"#00ff80\"\n";
+        let set = with_proxy(old, Some("socks5://h:1080"));
+        assert_eq!(
+            set,
+            format!(
+                "bar_height = 3\n\n{PROXY_COMMENT}\n{line}\n\n# Colours.\n[colors]\ncpu = \"#00ff80\"\n"
+            )
+        );
+        assert_eq!(parse(&set).unwrap().colors.cpu.as_deref(), Some("#00ff80"));
+
+        assert_eq!(
+            with_proxy("record = true\n[colors]\n", Some("socks5://h:1080")),
+            format!("record = true\n\n{PROXY_COMMENT}\n{line}\n\n[colors]\n")
+        );
+        // Without tables it goes at the end.
+        assert_eq!(
+            with_proxy("bar_height = 3", Some("socks5://h:1080")),
+            format!("bar_height = 3\n\n{PROXY_COMMENT}\n{line}\n")
+        );
+        assert_eq!(
+            with_proxy("", Some("socks5://h:1080")),
+            format!("{PROXY_COMMENT}\n{line}\n")
+        );
+    }
+
+    #[test]
+    fn set_proxy_saves_and_reports_the_previous_one() {
+        let dir = std::env::temp_dir().join(format!("lssh-proxy-{}", std::process::id()));
+        let file = dir.join("config.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A missing config is created first.
+        assert_eq!(set_proxy_at(&file, Some("socks5://h:1080")).unwrap(), None);
+        let saved = parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(saved.proxy.as_deref(), Some("socks5://h:1080"));
+        assert_eq!(
+            set_proxy_at(&file, None).unwrap().as_deref(),
+            Some("socks5://h:1080")
+        );
+        assert_eq!(set_proxy_at(&file, None).unwrap(), None);
+
+        // A config broken elsewhere is left alone.
+        std::fs::write(&file, "theme = \n").unwrap();
+        let error = set_proxy_at(&file, Some("socks5://h:1080")).unwrap_err();
+        assert!(error.to_string().contains("lssh config edit"), "{error}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "theme = \n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

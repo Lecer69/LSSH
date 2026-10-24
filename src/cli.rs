@@ -12,8 +12,10 @@ use colored::Colorize;
 /// A parsed command line.
 #[derive(Debug, PartialEq)]
 pub enum Command {
-    /// Plain `lssh`: pick a server interactively.
-    Pick,
+    /// Plain `lssh` (or `lssh -x`): pick a server interactively.
+    Pick {
+        proxy: bool,
+    },
     Add {
         name: String,
         target: String,
@@ -39,28 +41,38 @@ pub enum Command {
         name: String,
         key: Option<String>,
         keep_password: bool,
+        proxy: bool,
     },
     Connect {
         name: String,
         record: bool,
+        proxy: bool,
     },
     Run {
         servers: String,
         command: Vec<String>,
+        proxy: bool,
     },
     Cp {
         from: String,
         to: String,
         recursive: bool,
+        proxy: bool,
     },
     Status {
         servers: Option<String>,
+        proxy: bool,
     },
     Top {
         servers: Option<String>,
+        proxy: bool,
     },
     Config {
         action: Option<String>,
+    },
+    Proxy {
+        action: Option<String>,
+        address: Option<String>,
     },
     Completions {
         shell: String,
@@ -159,6 +171,13 @@ const KEY_OPT: Opt = Opt {
     short: Some('k'),
     value: Some("<file>"),
     about: "log in with this private key",
+};
+
+const PROXY_OPT: Opt = Opt {
+    long: "--proxy",
+    short: Some('x'),
+    value: None,
+    about: "connect through the saved proxy (lssh proxy set)",
 };
 
 pub const COMMANDS: &[Spec] = &[
@@ -275,6 +294,7 @@ pub const COMMANDS: &[Spec] = &[
                 value: None,
                 about: "keep the saved password after switching to the key",
             },
+            PROXY_OPT,
         ],
         about: "switch a server from password to key login",
         details: "Installs your public key on the server with ssh-copy-id, checks that\n\
@@ -285,6 +305,7 @@ pub const COMMANDS: &[Spec] = &[
             name: p.arg(0),
             key: p.value("--key"),
             keep_password: p.flag("--keep-password"),
+            proxy: p.flag("--proxy"),
         },
     },
     Spec {
@@ -292,21 +313,30 @@ pub const COMMANDS: &[Spec] = &[
         alias: Some("c"),
         group: Group::Remote,
         args: &["<name>"],
-        options: &[Opt {
-            long: "--record",
-            short: Some('r'),
-            value: None,
-            about: "record the session to ~/.local/share/lssh/recordings",
-        }],
+        options: &[
+            Opt {
+                long: "--record",
+                short: Some('r'),
+                value: None,
+                about: "record the session to ~/.local/share/lssh/recordings",
+            },
+            PROXY_OPT,
+        ],
         about: "connect to a server (or just: lssh <name>)",
         details: "Opens an SSH session with a live stats bar at the bottom of the terminal.\n\
                   Use '-' as the name to reconnect to the last server, or run plain 'lssh'\n\
                   to pick one from a list. Recordings play back with 'asciinema play'.",
-        examples: &["lssh web", "lssh -", "lssh connect web --record"],
+        examples: &[
+            "lssh web",
+            "lssh -",
+            "lssh connect web --record",
+            "lssh web -x",
+        ],
         completes: Complete::Server,
         build: |p| Command::Connect {
             name: p.arg(0),
             record: p.flag("--record"),
+            proxy: p.flag("--proxy"),
         },
     },
     Spec {
@@ -314,20 +344,22 @@ pub const COMMANDS: &[Spec] = &[
         alias: None,
         group: Group::Remote,
         args: &["<servers>", "<command>..."],
-        options: &[],
+        options: &[PROXY_OPT],
         about: "run a command on one or more servers",
         details: "<servers> is a name, a comma-separated list or 'all'. With several servers\n\
                   the command runs on all of them at once and each output line is prefixed\n\
-                  with the server's name.",
+                  with the server's name. Options go before <servers>.",
         examples: &[
             "lssh run web uptime",
             "lssh run web,db -- df -h /",
             "lssh run all 'free -m'",
+            "lssh run -x all uptime",
         ],
         completes: Complete::Servers,
         build: |p| Command::Run {
             servers: p.arg(0),
             command: p.rest(1),
+            proxy: p.flag("--proxy"),
         },
     },
     Spec {
@@ -335,12 +367,15 @@ pub const COMMANDS: &[Spec] = &[
         alias: None,
         group: Group::Remote,
         args: &["<from>", "<to>"],
-        options: &[Opt {
-            long: "--recursive",
-            short: Some('r'),
-            value: None,
-            about: "copy directories",
-        }],
+        options: &[
+            Opt {
+                long: "--recursive",
+                short: Some('r'),
+                value: None,
+                about: "copy directories",
+            },
+            PROXY_OPT,
+        ],
         about: "copy files to or from a server",
         details: "One side is <server>:<path>, the other a local path.",
         examples: &[
@@ -352,6 +387,7 @@ pub const COMMANDS: &[Spec] = &[
             from: p.arg(0),
             to: p.arg(1),
             recursive: p.flag("--recursive"),
+            proxy: p.flag("--proxy"),
         },
     },
     Spec {
@@ -359,15 +395,17 @@ pub const COMMANDS: &[Spec] = &[
         alias: None,
         group: Group::Remote,
         args: &["[servers]"],
-        options: &[],
+        options: &[PROXY_OPT],
         about: "check which servers are reachable",
         details: "Opens a connection to each server's SSH port (all servers by default)\n\
                   and shows the latency and SSH version. Exits with status 1 if any\n\
-                  server is down.",
-        examples: &["lssh status", "lssh status web,db"],
+                  server is down. Through the proxy the latency is the time until the\n\
+                  server's SSH version arrives.",
+        examples: &["lssh status", "lssh status web,db", "lssh status -x"],
         completes: Complete::Servers,
         build: |p| Command::Status {
             servers: p.optional(0),
+            proxy: p.flag("--proxy"),
         },
     },
     Spec {
@@ -375,7 +413,7 @@ pub const COMMANDS: &[Spec] = &[
         alias: None,
         group: Group::Remote,
         args: &["[servers]"],
-        options: &[],
+        options: &[PROXY_OPT],
         about: "live stats of all servers on one screen",
         details: "Shows the stats bar of every server (all by default) together. Servers\n\
                   need a saved password or a key; connect once with 'lssh <name>' to save\n\
@@ -384,6 +422,7 @@ pub const COMMANDS: &[Spec] = &[
         completes: Complete::Servers,
         build: |p| Command::Top {
             servers: p.optional(0),
+            proxy: p.flag("--proxy"),
         },
     },
     Spec {
@@ -400,6 +439,29 @@ pub const COMMANDS: &[Spec] = &[
         completes: Complete::Choices(&["edit", "path"]),
         build: |p| Command::Config {
             action: p.optional(0),
+        },
+    },
+    Spec {
+        name: "proxy",
+        alias: None,
+        group: Group::Setup,
+        args: &["[set|unset]", "[address]"],
+        options: &[],
+        about: "show, save or remove the proxy used with -x",
+        details: "Commands that reach a server (connect, run, cp, copy-id, status and top)\n\
+                  go through this proxy when given -x or --proxy; without it they connect\n\
+                  directly. <address> is socks5://host:port (or just host:port) or\n\
+                  http://host:port. Host names are resolved by the proxy, and lssh talks\n\
+                  to it itself, so no netcat is needed. It is saved in config.toml.",
+        examples: &[
+            "lssh proxy set 127.0.0.1:10808",
+            "lssh web -x",
+            "lssh proxy unset",
+        ],
+        completes: Complete::Choices(&["set", "unset"]),
+        build: |p| Command::Proxy {
+            action: p.optional(0),
+            address: p.optional(1),
         },
     },
     Spec {
@@ -619,21 +681,34 @@ fn is_help_flag(arg: &str) -> bool {
 
 pub fn parse(args: &[String]) -> Result<Command, UsageError> {
     let Some((first, rest)) = args.split_first() else {
-        return Ok(Command::Pick);
+        return Ok(Command::Pick { proxy: false });
     };
     match first.as_str() {
         flag if is_help_flag(flag) => return Ok(Command::Help { topic: None }),
         "-V" | "--version" => return Ok(Command::Version),
         _ => {}
     }
+    // `lssh -x`: pick a server, then connect through the proxy.
+    if args.iter().all(|arg| PROXY_OPT.matches(arg)) {
+        return Ok(Command::Pick { proxy: true });
+    }
 
+    let connect = find("connect").expect("connect is in the command table");
+    // The option named by `--name=value`, as Spec::parse splits it.
+    let flag = match first.split_once('=') {
+        Some((flag, _)) if first.starts_with("--") => flag,
+        _ => first.as_str(),
+    };
     match find(first) {
         Some(spec) => spec.parse(rest),
         // `lssh web` is shorthand for `lssh connect web`, `lssh -` for the
-        // last server.
-        None if first == "-" || !first.starts_with('-') => find("connect")
-            .expect("connect is in the command table")
-            .parse(args),
+        // last server. Its options may come first, as in `lssh -x web`.
+        None if first == "-"
+            || !first.starts_with('-')
+            || connect.options.iter().any(|opt| opt.matches(flag)) =>
+        {
+            connect.parse(args)
+        }
         None => Err(UsageError::new(None, format!("unknown option '{first}'"))),
     }
 }
@@ -770,6 +845,7 @@ mod tests {
         Command::Connect {
             name: name.into(),
             record: false,
+            proxy: false,
         }
     }
 
@@ -836,14 +912,102 @@ mod tests {
         let recording = Ok(Command::Connect {
             name: "web".into(),
             record: true,
+            proxy: false,
         });
         assert_eq!(parse_str("web --record"), recording);
         assert_eq!(parse_str("connect -r web"), recording);
+        assert_eq!(parse_str("-r web"), recording);
     }
 
     #[test]
     fn plain_lssh_picks() {
-        assert_eq!(parse_str(""), Ok(Command::Pick));
+        assert_eq!(parse_str(""), Ok(Command::Pick { proxy: false }));
+        for line in ["-x", "--proxy"] {
+            assert_eq!(parse_str(line), Ok(Command::Pick { proxy: true }));
+        }
+    }
+
+    #[test]
+    fn proxy_flag_works_everywhere_it_connects() {
+        let proxied = Ok(Command::Connect {
+            name: "web".into(),
+            record: false,
+            proxy: true,
+        });
+        for line in ["web -x", "-x web", "--proxy web", "c web --proxy"] {
+            assert_eq!(parse_str(line), proxied, "{line}");
+        }
+        assert_eq!(
+            parse_str("-x -"),
+            Ok(Command::Connect {
+                name: "-".into(),
+                record: false,
+                proxy: true,
+            })
+        );
+        assert_eq!(
+            parse_str("run -x all uptime"),
+            Ok(Command::Run {
+                servers: "all".into(),
+                command: vec!["uptime".into()],
+                proxy: true,
+            })
+        );
+        // After <servers>, -x belongs to the remote command.
+        assert_eq!(
+            parse_str("run all -x"),
+            Ok(Command::Run {
+                servers: "all".into(),
+                command: vec!["-x".into()],
+                proxy: false,
+            })
+        );
+        assert_eq!(
+            parse_str("cp -x -r web:/etc ."),
+            Ok(Command::Cp {
+                from: "web:/etc".into(),
+                to: ".".into(),
+                recursive: true,
+                proxy: true,
+            })
+        );
+        assert_eq!(
+            parse_str("status -x"),
+            Ok(Command::Status {
+                servers: None,
+                proxy: true
+            })
+        );
+        assert_eq!(
+            parse_str("top web -x"),
+            Ok(Command::Top {
+                servers: Some("web".into()),
+                proxy: true
+            })
+        );
+        assert_eq!(error_of("ls -x"), "unknown option '-x'");
+        assert_eq!(
+            error_of("--proxy=1.2.3.4:1080 web"),
+            "--proxy takes no value"
+        );
+    }
+
+    #[test]
+    fn parses_proxy_command() {
+        let proxy = |action: Option<&str>, address: Option<&str>| {
+            Ok(Command::Proxy {
+                action: action.map(String::from),
+                address: address.map(String::from),
+            })
+        };
+        assert_eq!(parse_str("proxy"), proxy(None, None));
+        assert_eq!(
+            parse_str("proxy set 127.0.0.1:10808"),
+            proxy(Some("set"), Some("127.0.0.1:10808"))
+        );
+        assert_eq!(parse_str("proxy unset"), proxy(Some("unset"), None));
+        assert_eq!(error_of("proxy set a b"), "unexpected argument 'b'");
+        assert!(is_reserved("proxy"));
     }
 
     #[test]
@@ -852,6 +1016,7 @@ mod tests {
             Ok(Command::Run {
                 servers: servers.into(),
                 command: command.iter().map(|s| s.to_string()).collect(),
+                proxy: false,
             })
         };
         assert_eq!(parse_str("run web uptime"), run("web", &["uptime"]));
@@ -877,22 +1042,31 @@ mod tests {
             Ok(Command::Cp {
                 from: "web:/etc".into(),
                 to: ".".into(),
-                recursive: true
+                recursive: true,
+                proxy: false,
             })
         );
         assert_eq!(
-            parse_str("copy-id web --keep-password"),
+            parse_str("copy-id web --keep-password -x"),
             Ok(Command::CopyId {
                 name: "web".into(),
                 key: None,
-                keep_password: true
+                keep_password: true,
+                proxy: true,
             })
         );
-        assert_eq!(parse_str("status"), Ok(Command::Status { servers: None }));
+        assert_eq!(
+            parse_str("status"),
+            Ok(Command::Status {
+                servers: None,
+                proxy: false
+            })
+        );
         assert_eq!(
             parse_str("top web,db"),
             Ok(Command::Top {
-                servers: Some("web,db".into())
+                servers: Some("web,db".into()),
+                proxy: false
             })
         );
         assert_eq!(parse_str("import"), Ok(Command::Import { file: None }));
@@ -939,7 +1113,7 @@ mod tests {
         assert_eq!(error_of("ls web"), "unexpected argument 'web'");
         assert_eq!(error_of("help add rm"), "unexpected argument 'rm'");
         assert_eq!(error_of("web uptime"), "unexpected argument 'uptime'");
-        assert_eq!(error_of("-x"), "unknown option '-x'");
+        assert_eq!(error_of("-z"), "unknown option '-z'");
         assert_eq!(error_of("rm -f web"), "unknown option '-f'");
         assert_eq!(error_of("ls --names=yes"), "--names takes no value");
     }
@@ -951,7 +1125,7 @@ mod tests {
             err,
             "missing <user@host[:port]>\nusage: lssh add [options] <name> <user@host[:port]>"
         );
-        let err = parse_str("-x").unwrap_err().to_string();
+        let err = parse_str("-z").unwrap_err().to_string();
         assert!(err.ends_with("run 'lssh help' for usage"));
     }
 

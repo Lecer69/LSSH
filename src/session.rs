@@ -13,6 +13,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use crate::askpass::Askpass;
 use crate::config::Config;
 use crate::out;
+use crate::proxy::{self, Proxy};
 use crate::record::Recorder;
 use crate::stats::{self, Stats};
 use crate::store::{self, Server};
@@ -25,21 +26,24 @@ pub struct Session {
     pub config: Config,
     /// Save the session as an asciicast recording.
     pub record: bool,
+    /// Go through this proxy (`-x`).
+    pub proxy: Option<Proxy>,
 }
 
 /// Entry point: use the PTY proxy + stats bar when attached to a TTY and the
 /// bar is enabled, otherwise fall back to a plain `ssh` invocation.
 pub fn run(session: &Session) -> Result<()> {
     let askpass = Askpass::new(&session.server, true)?;
+    let proxy_options = proxy::ssh_options(session.proxy.as_ref())?;
     let target = session.server.target();
 
     let (cols, rows) = match crossterm::terminal::size() {
         Ok(size) if size.0 > 0 && size.1 > 0 => size,
-        _ => return run_plain(session, &askpass),
+        _ => return run_plain(session, &askpass, &proxy_options),
     };
     let layout = Layout::new(&session.config, cols, rows);
     if layout.bar_h == 0 || !is_tty() {
-        return run_plain(session, &askpass);
+        return run_plain(session, &askpass, &proxy_options);
     }
 
     let control_dir = create_control_dir()?;
@@ -57,7 +61,7 @@ pub fn run(session: &Session) -> Result<()> {
         })
         .context("failed to open a pty")?;
 
-    let command = build_command(session, &control_path, &askpass);
+    let command = build_command(session, &control_path, &askpass, &proxy_options);
     let mut child = pair
         .slave
         .spawn_command(command)
@@ -483,13 +487,14 @@ fn kill_child(child: &mut PtyChild) {
 }
 
 /// Plain pass-through used when there is no TTY or the bar is disabled.
-fn run_plain(session: &Session, askpass: &Askpass) -> Result<()> {
+fn run_plain(session: &Session, askpass: &Askpass, proxy_options: &[String]) -> Result<()> {
     if session.record {
         out::warn("recording needs the stats bar session, so this one is not recorded");
     }
     let status = askpass
         .apply(&mut std::process::Command::new("ssh"))
         .args(session.server.ssh_options())
+        .args(proxy_options)
         .arg(session.server.target())
         .status()
         .context("failed to launch ssh (is openssh installed?)")?;
@@ -503,11 +508,12 @@ fn run_plain(session: &Session, askpass: &Askpass) -> Result<()> {
 /// Build the interactive `ssh` command.
 ///
 /// `ControlMaster=yes` turns this session into a multiplexing master so the
-/// stats poller can reuse its authenticated connection.
+/// stats poller can reuse its authenticated connection (and its proxy).
 fn build_command(
     session: &Session,
     control_path: &std::path::Path,
     askpass: &Askpass,
+    proxy_options: &[String],
 ) -> CommandBuilder {
     let mut command = CommandBuilder::new("ssh");
     command.args([
@@ -521,6 +527,7 @@ fn build_command(
         "ServerAliveCountMax=3".to_string(),
     ]);
     command.args(session.server.ssh_options());
+    command.args(proxy_options);
     command.arg(session.server.target());
     for (key, value) in askpass.vars() {
         command.env(key, value);
