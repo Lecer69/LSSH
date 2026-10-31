@@ -1,6 +1,7 @@
 # LSSH
 
-Simple SSH server manager for your terminal, with a btop-style live stats bar.
+Simple SSH server manager for your terminal, with a live stats bar
+and a built-in SFTP file panel.
 
 ## Install
 
@@ -154,6 +155,69 @@ CPU █░░░░░░░░░   2%  MEM █░░░░░░░░░  13%
 `lssh top` puts the bars of all servers on one screen. It only uses saved
 passwords and keys, so connect to a server once before watching it there.
 
+### File panel (SFTP)
+
+Press **Ctrl+N** in a session to open a file browser for the server on the
+left side of the terminal; the shell keeps running next to it. It talks SFTP
+over the session's own connection, so there is no second login, and it goes
+through the same proxy.
+
+```
+ SFTP  laptop                  ?  ✕ │[lecer@laptop lssh-test]$ ls
+ /tmp/lssh-test                     │a.txt  folder  sub  with space.bin
+ ..                                 │[lecer@laptop lssh-test]$
+ folder/                          — │
+ sub/                          293K │
+ a.txt                           6B │
+ with space.bin                1.4M │
+                                    │
+ ↑ Uploading big.iso                │
+ █████████▍░░░░░░░░░░░  45% 11M/s  ✕│
+ -rw-r--r--  1.4M  2026-10-31 15:23 │
+ +File   +Dir   ↑Up   ↓Get   ✕Del   │
+```
+
+Everything works with the keyboard and the mouse:
+
+| Key | Mouse | |
+| --- | --- | --- |
+| `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | click, wheel | move |
+| `Enter` / `→` | double-click | open a folder (on a file: download it) |
+| `←` / `Backspace` | click a folder in the path | go up |
+| `Space`, `a` | right-click (or Ctrl+click) | mark entries (all of them) |
+| `n` / `m` | `+File` / `+Dir` | new file / new folder |
+| `u` | `↑Up`, or drop files on the terminal | upload files or folders |
+| `d` | `↓Get` | download (to `~/Downloads` by default) |
+| `Delete` / `x` | `✕Del` | delete, after two confirmations |
+| `R` / `F2` | | rename |
+| `s` | | measure a folder's size |
+| `.` | | show hidden files |
+| `r` / `F5`, `/`, `~` | | refresh, go to a path, go home |
+| `c` | `✕` on the progress bar | cancel the running transfer |
+| `<` `>` | drag the border | narrower / wider |
+| `Tab` | click the shell | type in the shell (Ctrl+N comes back) |
+| `Esc`, `q`, `Ctrl+N` | `✕` in the corner | close the panel |
+| `?` | `?` in the corner | list the keys |
+
+- Sizes are shown for every file; `s` measures a folder (all its contents).
+- Deleting always asks twice: first what would be removed (for folders, how
+  many files and how much data, counted on the server), then you type the
+  name (or `delete` for several items). `Cancel` is the default, and nothing
+  is removed until both are confirmed. Links are removed, never followed.
+- Dropping files from a file manager onto the terminal pastes their paths;
+  while the panel has focus that uploads them to the folder it shows.
+  Existing files are only replaced after you confirm.
+- Uploads and downloads run in the background, one after another, so you
+  can keep browsing (or close the panel) meanwhile. Folders are copied with
+  everything in them; a cancelled transfer leaves no half-written file.
+- If the remote shell reports its directory (OSC 7, e.g. fish or bash with
+  `vte.sh`), the panel opens there; otherwise in your home folder.
+- While the panel is open, the mouse wheel scrolls the shell's history, and
+  full-screen apps get mouse events and the arrow keys as usual.
+
+Ctrl+N is taken from the remote while the panel is enabled; set
+`sftp = false` in the config to give it back (to nano or vim, for example).
+
 ### Recording
 
 `lssh connect <name> --record` (or `record = true` in the config) saves the
@@ -170,8 +234,7 @@ opens it in `$EDITOR` and checks it afterwards.
 # How often remote stats are refreshed, in milliseconds (200-60000).
 update_interval_ms = 1000
 
-# Lines reserved at the bottom for the stats bar.
-# 0 disables the bar entirely (plain ssh, no stats, no scroll region).
+# Lines reserved at the bottom for the stats bar (0 disables it).
 bar_height = 2
 
 # Blank lines between the shell and the stats bar (0-3).
@@ -203,6 +266,22 @@ alert_disk = 90
 
 # Record every session (see Recording above).
 record = false
+
+# Ctrl+N opens an SFTP file panel on the left of the session (see
+# `lssh help connect`). Set sftp = false to pass Ctrl+N to the remote
+# instead. With bar_height = 0 and sftp = false, sessions are plain ssh.
+sftp = true
+
+# Width of the file panel in columns (20-200; it always leaves room for
+# the shell). Drag its border or press < and > in it to change it.
+sftp_width = 36
+
+# Show hidden (dot) files in the panel from the start (toggle with .).
+sftp_hidden = false
+
+# Where the panel downloads to. Empty means ~/Downloads, or the folder
+# lssh was started in when there is none.
+download_dir = ""
 
 # Proxy for commands run with -x (lssh <name> -x), e.g. a local xray or
 # v2ray client: "socks5://host:port" (or just "host:port") or
@@ -240,6 +319,9 @@ lssh completions fish > ~/.config/fish/completions/lssh.fish
   cannot read show `n/a`; the shell itself works normally.
 - The bar is redrawn immediately when the remote clears the screen or switches
   to/from a full-screen app (vim, htop, ...). Set `bar_height = 0` to disable it.
+- The file panel needs the server's SFTP subsystem (OpenSSH has it on by
+  default). Ending the shell while a transfer runs lets the transfer finish
+  first; Ctrl+C stops it.
 - Piping output, running without a TTY, or a terminal shorter than 4 rows falls
   back to a plain `ssh` session.
 

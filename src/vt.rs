@@ -60,6 +60,15 @@ impl Filter {
         }
     }
 
+    /// Start over between sequences, e.g. after the stream went elsewhere
+    /// for a while, with the remote on the alt screen or not.
+    pub fn reset(&mut self, alt_screen: bool) {
+        self.state = State::Ground;
+        self.csi.clear();
+        self.autowrap = true;
+        self.alt_screen = alt_screen;
+    }
+
     pub fn set_pty_rows(&mut self, rows: u16) {
         self.pty_rows = rows.max(1);
     }

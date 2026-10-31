@@ -325,7 +325,15 @@ pub const COMMANDS: &[Spec] = &[
         about: "connect to a server (or just: lssh <name>)",
         details: "Opens an SSH session with a live stats bar at the bottom of the terminal.\n\
                   Use '-' as the name to reconnect to the last server, or run plain 'lssh'\n\
-                  to pick one from a list. Recordings play back with 'asciinema play'.",
+                  to pick one from a list. Recordings play back with 'asciinema play'.\n\
+                  \n\
+                  Ctrl+N opens an SFTP file panel on the left (Ctrl+N again or Esc closes it,\n\
+                  Tab switches to the shell). In it: Enter opens, Backspace goes up, n/m make\n\
+                  a file/folder, u uploads (or drop files on the terminal), d downloads,\n\
+                  Delete removes after two confirmations, R renames, s sizes a folder, and\n\
+                  ? lists every key. The mouse works too: click, double-click, right-click\n\
+                  to mark, wheel, and drag the border to resize. Set sftp = false in the\n\
+                  config to pass Ctrl+N to the remote instead.",
         examples: &[
             "lssh web",
             "lssh -",

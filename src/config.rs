@@ -50,6 +50,14 @@ pub struct Config {
     pub alert_disk: u8,
     /// Record every session as an asciicast file.
     pub record: bool,
+    /// Ctrl+N opens the SFTP file panel (false passes Ctrl+N to the remote).
+    pub sftp: bool,
+    /// Width of the file panel in columns.
+    pub sftp_width: u16,
+    /// Show hidden files in the panel from the start.
+    pub sftp_hidden: bool,
+    /// Where the panel downloads to; empty means ~/Downloads.
+    pub download_dir: String,
     /// Proxy for commands run with `-x`, e.g. "socks5://127.0.0.1:10808".
     pub proxy: Option<String>,
     /// Per-colour overrides on top of `theme`.
@@ -111,6 +119,10 @@ impl Default for Config {
             alert_memory: 85,
             alert_disk: 90,
             record: false,
+            sftp: true,
+            sftp_width: 36,
+            sftp_hidden: false,
+            download_dir: String::new(),
             proxy: None,
             colors: Colors::default(),
         }
@@ -126,6 +138,7 @@ impl Config {
         self.alert_cpu = self.alert_cpu.min(100);
         self.alert_memory = self.alert_memory.min(100);
         self.alert_disk = self.alert_disk.min(100);
+        self.sftp_width = self.sftp_width.clamp(20, 200);
         if self.theme.trim().is_empty() {
             self.theme = "btop".to_string();
         }
@@ -149,8 +162,7 @@ pub const DEFAULT_TOML: &str = r##"# LSSH configuration
 # How often remote stats are refreshed, in milliseconds (200-60000).
 update_interval_ms = 1000
 
-# Lines reserved at the bottom for the stats bar.
-# 0 disables the bar entirely (plain ssh, no stats, no scroll region).
+# Lines reserved at the bottom for the stats bar (0 disables it).
 bar_height = 2
 
 # Blank lines between the shell and the stats bar (0-3).
@@ -184,6 +196,22 @@ alert_disk = 90
 # file (play one back with `asciinema play <file>`). Without this,
 # `lssh connect <name> --record` records a single session.
 record = false
+
+# Ctrl+N opens an SFTP file panel on the left of the session (see
+# `lssh help connect`). Set sftp = false to pass Ctrl+N to the remote
+# instead. With bar_height = 0 and sftp = false, sessions are plain ssh.
+sftp = true
+
+# Width of the file panel in columns (20-200; it always leaves room for
+# the shell). Drag its border or press < and > in it to change it.
+sftp_width = 36
+
+# Show hidden (dot) files in the panel from the start (toggle with .).
+sftp_hidden = false
+
+# Where the panel downloads to. Empty means ~/Downloads, or the folder
+# lssh was started in when there is none.
+download_dir = ""
 
 # Proxy for commands run with -x (lssh <name> -x), e.g. a local xray or
 # v2ray client: "socks5://host:port" (or just "host:port") or
