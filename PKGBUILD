@@ -7,17 +7,19 @@ arch=('x86_64')
 url="https://github.com/Lecer69/LSSH"
 license=('Unlicense')
 depends=('openssh' 'dbus')
-makedepends=('cargo' 'git')
-source=("$pkgname::git+https://github.com/Lecer69/LSSH.git#branch=master")
+makedepends=('cargo')
+options=('!debug')
+# pkgver, pkgrel and sha256sums are filled in by .github/workflows/aur.yml on release.
+source=("$pkgname-$pkgver.tar.gz::https://github.com/Lecer69/LSSH/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
-    cd "$pkgname"
+    cd "LSSH-$pkgver"
     cargo build --release
 }
 
 package() {
-    cd "$pkgname"
+    cd "LSSH-$pkgver"
     install -Dm755 target/release/lssh "$pkgdir/usr/bin/lssh"
     install -Dm644 README.md "$pkgdir/usr/share/doc/lssh/README.md"
 
