@@ -1,7 +1,7 @@
 //! Commands that work with servers without an interactive session:
-//! `run`, `cp`, `copy-id` and `status`.
+//! `run`, `copy-id` and `status` (`cp` lives in `copy.rs`).
 
-use std::io::{BufRead, BufReader, IsTerminal, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -51,7 +51,7 @@ pub fn run(servers: &str, command: &[String], use_proxy: bool) -> Result<()> {
 fn run_one(server: &Server, remote: &str, proxy_options: &[String]) -> Result<()> {
     let askpass = Askpass::new(server, true)?;
     let mut command = ssh(server, &askpass, proxy_options);
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    if out::interactive() {
         // A tty lets interactive commands (top, sudo, ...) work.
         command.arg("-t");
     }
@@ -84,9 +84,13 @@ fn run_many(servers: &[Server], remote: &str, proxy_options: &[String]) -> Resul
             let remote = remote.to_string();
             let proxy_options = proxy_options.to_vec();
             let pad = " ".repeat(width - server.name.chars().count());
-            let label = format!("{}{pad} │", server.name)
-                .color(LABEL_COLORS[i % LABEL_COLORS.len()])
-                .to_string();
+            let label = if out::raw() {
+                format!("{}:", server.name)
+            } else {
+                format!("{}{pad} │", server.name)
+                    .color(LABEL_COLORS[i % LABEL_COLORS.len()])
+                    .to_string()
+            };
             thread::spawn(move || -> Result<Finished> {
                 // Prompts from several servers at once would garble the
                 // terminal, so only saved passwords and keys are used.
@@ -139,6 +143,17 @@ fn run_many(servers: &[Server], remote: &str, proxy_options: &[String]) -> Resul
         failed.push((server, outcome));
     }
 
+    if out::raw() {
+        // The output is the remote commands' own; failures go to stderr.
+        for (server, outcome) in &failed {
+            eprintln!("error: {}: {outcome}", server.name);
+        }
+        return if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(Exit(1).into())
+        };
+    }
     println!();
     if failed.is_empty() {
         out::success(format_args!("succeeded on all {} servers", servers.len()));
@@ -178,47 +193,6 @@ fn prefix_lines(stream: impl Read, label: &str, stderr: bool) -> bool {
         line.clear();
     }
     denied
-}
-
-pub fn cp(from: &str, to: &str, recursive: bool, use_proxy: bool) -> Result<()> {
-    let store = Store::open()?;
-    let (server, source, destination) = match (on_server(&store, from), on_server(&store, to)) {
-        (Some((server, path)), None) => (server, server.scp_path(path), to.to_string()),
-        (None, Some((server, path))) => (server, from.to_string(), server.scp_path(path)),
-        (Some(_), Some(_)) => {
-            bail!("copying between two servers isn't supported\ncopy to this machine first")
-        }
-        (None, None) => bail!(
-            "neither '{from}' nor '{to}' is on a saved server\n\
-             write remote paths as <server>:<path>, e.g. web:/etc/hosts"
-        ),
-    };
-
-    let proxy_options = proxy::ssh_options(proxy::resolve(use_proxy)?.as_ref())?;
-    let askpass = Askpass::new(server, true)?;
-    let mut command = Command::new("scp");
-    askpass.apply(&mut command);
-    if recursive {
-        command.arg("-r");
-    }
-    let status = command
-        .args(server.ssh_options())
-        .args(&proxy_options)
-        .arg(&source)
-        .arg(&destination)
-        .status()
-        .context("failed to launch scp (is openssh installed?)")?;
-    if !status.success() {
-        bail!("scp failed ({status})");
-    }
-    out::success(format_args!("copied {from} → {to}"));
-    Ok(())
-}
-
-/// Split `<server>:<path>` when `<server>` is a saved server.
-fn on_server<'a>(store: &'a Store, spec: &'a str) -> Option<(&'a Server, &'a str)> {
-    let (name, path) = spec.split_once(':')?;
-    Some((store.get(name).ok()?, path))
 }
 
 pub fn copy_id(name: &str, key: Option<&str>, keep_password: bool, use_proxy: bool) -> Result<()> {
@@ -392,6 +366,22 @@ pub fn status(servers: Option<&str>, use_proxy: bool) -> Result<()> {
         let result = probe
             .join()
             .unwrap_or_else(|_| Err(anyhow::anyhow!("probe crashed")));
+        if out::raw() {
+            // name, up/down, latency in ms or the reason, SSH version.
+            match result {
+                Ok(probe) => println!(
+                    "{}\tup\t{}\t{}",
+                    server.name,
+                    probe.latency.as_millis(),
+                    probe.banner.unwrap_or_default()
+                ),
+                Err(e) => {
+                    down += 1;
+                    println!("{}\tdown\t\t{e:#}", server.name);
+                }
+            }
+            continue;
+        }
         match result {
             Ok(probe) => println!(
                 "  {}{pad}   {} {}   {:>6}   {}",
@@ -545,18 +535,5 @@ mod tests {
         let error = probe_through(&server, &proxy).err().unwrap();
         assert_eq!(error.to_string(), "no answer through the proxy");
         fake.join().unwrap();
-    }
-
-    #[test]
-    fn remote_paths_need_a_saved_server() {
-        let path = std::env::temp_dir().join(format!("lssh-test-cp-{}.json", std::process::id()));
-        let mut store = Store::open_at(path).unwrap();
-        store
-            .add(Server::new("web", "root@10.0.0.1").unwrap())
-            .unwrap();
-        let (server, rest) = on_server(&store, "web:/etc/hosts").unwrap();
-        assert_eq!((server.name.as_str(), rest), ("web", "/etc/hosts"));
-        assert!(on_server(&store, "db:/etc/hosts").is_none());
-        assert!(on_server(&store, "./local").is_none());
     }
 }

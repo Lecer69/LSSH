@@ -3,7 +3,7 @@
 
 use anyhow::{Result, bail};
 
-use crate::cli::{COMMANDS, Complete, Spec};
+use crate::cli::{COMMANDS, Complete, Opt, RAW_OPT, Spec};
 
 pub fn script(shell: &str) -> Result<String> {
     Ok(match shell {
@@ -27,9 +27,14 @@ fn all_command_words() -> String {
         .join(" ")
 }
 
+/// A command's options plus the global ones.
+fn options(spec: &Spec) -> impl Iterator<Item = &Opt> {
+    spec.options.iter().chain(std::iter::once(&RAW_OPT))
+}
+
 fn option_words(spec: &Spec) -> String {
     let mut words = Vec::new();
-    for opt in spec.options {
+    for opt in options(spec) {
         words.push(opt.long.to_string());
         if let Some(short) = opt.short {
             words.push(format!("-{short}"));
@@ -224,8 +229,7 @@ fi
 }
 
 fn zsh_option_specs(spec: &Spec) -> Vec<String> {
-    spec.options
-        .iter()
+    options(spec)
         .map(|opt| {
             let about = opt.about.replace('[', "\\[").replace(']', "\\]");
             let value = match opt.value {
@@ -274,7 +278,7 @@ fn fish() -> String {
         if let Some(argument) = argument {
             lines.push(format!("complete -c lssh -n {condition} {argument}"));
         }
-        for opt in spec.options {
+        for opt in options(spec) {
             let mut line = format!(
                 "complete -c lssh -n {condition} -l {}",
                 opt.long.trim_start_matches("--")
@@ -314,9 +318,11 @@ end
 
 complete -c lssh -f
 complete -c lssh -n __lssh_no_command -a '(__lssh_servers)' -d server
+complete -c lssh -n __lssh_no_command -l raw -d {raw}
 {}
 "#,
-        lines.join("\n")
+        lines.join("\n"),
+        raw = fish_quote(RAW_OPT.about),
     )
 }
 

@@ -30,6 +30,7 @@ const INTERACTIVE_VAR: &str = "LSSH_ASKPASS_INTERACTIVE";
 pub struct Askpass {
     vars: Vec<(&'static str, String)>,
     state: PathBuf,
+    keys_only: bool,
 }
 
 impl Askpass {
@@ -37,6 +38,11 @@ impl Askpass {
     /// saved password (or it was rejected). Turn it off when several
     /// connections run at once.
     pub fn new(server: &Server, interactive: bool) -> Result<Askpass> {
+        // Raw mode never waits for input.
+        let interactive = interactive && !crate::out::raw();
+        // Without a terminal to ask on and nothing saved, ssh would send
+        // empty passwords (fail2ban counts those): offer only keys.
+        let keys_only = !interactive && !matches!(password::get(&server.name), Ok(Some(_)));
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let exe = std::env::current_exe().context("could not locate the lssh binary")?;
         let state = store::runtime_dir().join(format!(
@@ -56,15 +62,39 @@ impl Askpass {
                 if interactive { "1" } else { "0" }.to_string(),
             ),
         ];
-        Ok(Askpass { vars, state })
+        Ok(Askpass {
+            vars,
+            state,
+            keys_only,
+        })
+    }
+
+    /// ssh options that go with this askpass: when nothing can answer a
+    /// password prompt, password logins are turned off.
+    pub fn ssh_options(&self) -> Vec<String> {
+        if !self.keys_only {
+            return Vec::new();
+        }
+        [
+            "-o",
+            "PasswordAuthentication=no",
+            "-o",
+            "KbdInteractiveAuthentication=no",
+        ]
+        .map(String::from)
+        .to_vec()
     }
 
     pub fn vars(&self) -> &[(&'static str, String)] {
         &self.vars
     }
 
+    /// Point `command` at this askpass, with [`Askpass::ssh_options`].
+    /// Only for commands that take ssh's `-o` options.
     pub fn apply<'a>(&self, command: &'a mut Command) -> &'a mut Command {
-        command.envs(self.vars.iter().map(|(k, v)| (k, v)))
+        command
+            .envs(self.vars.iter().map(|(k, v)| (k, v)))
+            .args(self.ssh_options())
     }
 }
 
@@ -222,5 +252,18 @@ mod tests {
         assert!(state.is_dir());
         drop(askpass);
         assert!(!state.exists());
+    }
+
+    #[test]
+    fn no_password_logins_without_a_way_to_answer() {
+        let server = Server::new("lssh-test-no-such-server", "root@host").unwrap();
+        let quiet = Askpass::new(&server, false).unwrap();
+        assert!(
+            quiet
+                .ssh_options()
+                .contains(&"PasswordAuthentication=no".to_string())
+        );
+        let asking = Askpass::new(&server, true).unwrap();
+        assert!(asking.ssh_options().is_empty());
     }
 }

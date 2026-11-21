@@ -50,7 +50,7 @@ pub fn run(session: &Session) -> Result<()> {
     let target = session.server.target();
 
     let (cols, rows) = match crossterm::terminal::size() {
-        Ok(size) if size.0 > 0 && size.1 > 0 => size,
+        Ok(size) if size.0 > 0 && size.1 > 0 && !out::raw() => size,
         _ => return run_plain(session, &askpass, &proxy_options),
     };
     let layout = Layout::new(&session.config, cols, rows);

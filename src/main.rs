@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod completions;
 mod config;
+mod copy;
 mod files;
 mod frame;
 mod import;
@@ -50,7 +51,12 @@ fn main() -> ExitCode {
     out::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = match cli::parse(&args) {
-        Ok(command) => command,
+        Ok(cli::Invocation { command, raw }) => {
+            if raw {
+                out::set_raw();
+            }
+            command
+        }
         Err(usage) => {
             out::error(&usage.to_string());
             return ExitCode::from(2);
@@ -98,7 +104,7 @@ fn run(command: Command) -> Result<()> {
             to,
             recursive,
             proxy,
-        } => remote::cp(&from, &to, recursive, proxy),
+        } => copy::cp(&from, &to, recursive, proxy),
         Command::Status { servers, proxy } => remote::status(servers.as_deref(), proxy),
         Command::Top { servers, proxy } => commands::top(servers.as_deref(), proxy),
         Command::Config { action } => commands::config(action.as_deref()),

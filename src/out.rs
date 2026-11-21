@@ -2,38 +2,76 @@
 
 use std::fmt::{self, Display};
 use std::io::{self, ErrorKind, IsTerminal};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use colored::Colorize;
 
 use crate::store::Server;
 
+/// Environment variable that turns on raw mode, like `--raw`.
+pub const RAW_VAR: &str = "LSSH_RAW";
+
+static RAW: AtomicBool = AtomicBool::new(false);
+
 /// Turn colours off when stdout is not a terminal (e.g. `lssh ls | grep`).
+/// `LSSH_RAW` (anything but empty or `0`) turns on raw mode.
 pub fn init() {
     if !std::io::stdout().is_terminal() {
         colored::control::set_override(false);
     }
+    if std::env::var(RAW_VAR).is_ok_and(|v| !v.is_empty() && v != "0") {
+        set_raw();
+    }
+}
+
+/// Raw mode: plain output for scripts. No colours, symbols, stats bar,
+/// file panel or progress bars, and nothing is asked on the terminal.
+pub fn set_raw() {
+    RAW.store(true, Ordering::Relaxed);
+    colored::control::set_override(false);
+}
+
+pub fn raw() -> bool {
+    RAW.load(Ordering::Relaxed)
 }
 
 pub fn success(msg: impl Display) {
-    println!("{} {msg}", "✔".green().bold());
+    if raw() {
+        println!("{msg}");
+    } else {
+        println!("{} {msg}", "✔".green().bold());
+    }
 }
 
-/// Something lssh is about to do.
+/// Something lssh is about to do. Not shown in raw mode.
 pub fn step(msg: impl Display) {
-    println!("{} {msg}", "→".cyan().bold());
+    if !raw() {
+        println!("{} {msg}", "→".cyan().bold());
+    }
 }
 
 pub fn info(msg: impl Display) {
-    println!("{} {msg}", "ℹ".cyan().bold());
+    if raw() {
+        println!("{msg}");
+    } else {
+        println!("{} {msg}", "ℹ".cyan().bold());
+    }
 }
 
 /// A dimmed follow-up line under a message, e.g. what to run next.
+/// Not shown in raw mode.
 pub fn hint(msg: impl Display) {
-    println!("  {}", msg.to_string().dimmed());
+    if !raw() {
+        println!("  {}", msg.to_string().dimmed());
+    }
 }
 
 pub fn warn(msg: impl Display) {
-    eprintln!("{} {msg}", "⚠".yellow().bold());
+    if raw() {
+        eprintln!("warning: {msg}");
+    } else {
+        eprintln!("{} {msg}", "⚠".yellow().bold());
+    }
 }
 
 /// Print an error. The first line is the error itself; any further lines
@@ -75,8 +113,9 @@ pub fn target(server: &Server) -> String {
 }
 
 /// Whether both stdin and stdout are a terminal, so a full-screen UI works.
+/// Never in raw mode.
 pub fn interactive() -> bool {
-    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    !raw() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 /// `5m ago`, `3h ago`, `12d ago`... for a Unix timestamp; `never` for none.

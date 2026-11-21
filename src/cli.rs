@@ -173,6 +173,21 @@ const KEY_OPT: Opt = Opt {
     about: "log in with this private key",
 };
 
+/// `--raw`, accepted by every command (see [`parse`]).
+pub const RAW_OPT: Opt = Opt {
+    long: "--raw",
+    short: None,
+    value: None,
+    about: "plain output for scripts and agents (also: LSSH_RAW=1)",
+};
+
+/// What `--raw` changes, for the help overview.
+const RAW_DETAILS: &str = "  With --raw, lssh prints plain text meant to be read by programs (scripts,\n\
+  \x20 AI agents): no colours or symbols, no stats bar or file panel, no progress\n\
+  \x20 bar, no hints, and it never waits for input: a missing password fails\n\
+  \x20 instead of prompting, and 'lssh' alone prints this help. Errors still go to\n\
+  \x20 stderr as 'error: ...' with exit status 2 for usage and 1 otherwise.";
+
 const PROXY_OPT: Opt = Opt {
     long: "--proxy",
     short: Some('x'),
@@ -385,10 +400,14 @@ pub const COMMANDS: &[Spec] = &[
             PROXY_OPT,
         ],
         about: "copy files to or from a server",
-        details: "One side is <server>:<path>, the other a local path.",
+        details: "One side is <server>:<path>, the other a local path; a relative remote path\n\
+                  starts in the home folder, and <server>: alone is the home folder. When\n\
+                  <to> is an existing folder (or ends with /) the copy goes inside it.\n\
+                  Files go over SFTP with a progress bar showing the speed and time left.",
         examples: &[
             "lssh cp web:/var/log/syslog .",
             "lssh cp -r ./site web:/srv/www",
+            "lssh cp backup.tar.gz web:",
         ],
         completes: Complete::RemotePath,
         build: |p| Command::Cp {
@@ -589,9 +608,10 @@ impl Spec {
         self.args.last().is_some_and(|a| a.ends_with("..."))
     }
 
-    fn parse(&'static self, words: &[String]) -> Result<Command, UsageError> {
+    fn parse(&'static self, words: &[String]) -> Result<Invocation, UsageError> {
         let error = |message: String| UsageError::new(Some(self.name), message);
         let mut parsed = Parsed::default();
+        let mut raw = false;
         let mut words = words.iter();
 
         while let Some(word) = words.next() {
@@ -605,9 +625,16 @@ impl Spec {
                 break;
             }
             if is_help_flag(word) {
-                return Ok(Command::Help {
-                    topic: Some(self.name.to_string()),
+                return Ok(Invocation {
+                    command: Command::Help {
+                        topic: Some(self.name.to_string()),
+                    },
+                    raw,
                 });
+            }
+            if word == RAW_OPT.long {
+                raw = true;
+                continue;
             }
             if !word.starts_with('-') || word == "-" {
                 parsed.args.push(word.clone());
@@ -636,7 +663,10 @@ impl Spec {
         }
 
         self.check_args(&parsed.args)?;
-        Ok((self.build)(&parsed))
+        Ok(Invocation {
+            command: (self.build)(&parsed),
+            raw,
+        })
     }
 
     fn check_args(&self, args: &[String]) -> Result<(), UsageError> {
@@ -687,18 +717,41 @@ fn is_help_flag(arg: &str) -> bool {
     arg == "-h" || arg == "--help"
 }
 
-pub fn parse(args: &[String]) -> Result<Command, UsageError> {
+/// A parsed command line: the command and the global `--raw` flag.
+#[derive(Debug, PartialEq)]
+pub struct Invocation {
+    pub command: Command,
+    pub raw: bool,
+}
+
+/// Parse the command line. `--raw` may come before the command or among
+/// its options; for `run` it must come before `<servers>`, since all that
+/// follows belongs to the remote command.
+pub fn parse(args: &[String]) -> Result<Invocation, UsageError> {
+    let leading = args.iter().take_while(|a| *a == RAW_OPT.long).count();
+    let mut invocation = parse_command(&args[leading..])?;
+    invocation.raw |= leading > 0;
+    Ok(invocation)
+}
+
+fn parse_command(args: &[String]) -> Result<Invocation, UsageError> {
+    let plain = |command| {
+        Ok(Invocation {
+            command,
+            raw: false,
+        })
+    };
     let Some((first, rest)) = args.split_first() else {
-        return Ok(Command::Pick { proxy: false });
+        return plain(Command::Pick { proxy: false });
     };
     match first.as_str() {
-        flag if is_help_flag(flag) => return Ok(Command::Help { topic: None }),
-        "-V" | "--version" => return Ok(Command::Version),
+        flag if is_help_flag(flag) => return plain(Command::Help { topic: None }),
+        "-V" | "--version" => return plain(Command::Version),
         _ => {}
     }
     // `lssh -x`: pick a server, then connect through the proxy.
     if args.iter().all(|arg| PROXY_OPT.matches(arg)) {
-        return Ok(Command::Pick { proxy: true });
+        return plain(Command::Pick { proxy: true });
     }
 
     let connect = find("connect").expect("connect is in the command table");
@@ -713,7 +766,8 @@ pub fn parse(args: &[String]) -> Result<Command, UsageError> {
         // last server. Its options may come first, as in `lssh -x web`.
         None if first == "-"
             || !first.starts_with('-')
-            || connect.options.iter().any(|opt| opt.matches(flag)) =>
+            || connect.options.iter().any(|opt| opt.matches(flag))
+            || flag == RAW_OPT.long =>
         {
             connect.parse(args)
         }
@@ -770,6 +824,12 @@ fn print_overview() {
         }
     }
     println!();
+    println!("{}", "Global options".bold());
+    print_row(RAW_OPT.long, RAW_OPT.about, width);
+    for line in RAW_DETAILS.lines() {
+        println!("  {}", line.dimmed());
+    }
+    println!();
     println!(
         "{}",
         "Run 'lssh help <command>' for details on a command.".dimmed()
@@ -795,18 +855,15 @@ fn print_command(spec: &Spec) {
             println!("  {line}");
         }
     }
-    if !spec.options.is_empty() {
-        println!();
-        println!("{}", "Options".bold());
-        let width = spec
-            .options
-            .iter()
-            .map(|opt| opt.signature().chars().count())
-            .max()
-            .unwrap_or(0);
-        for opt in spec.options {
-            print_row(&opt.signature(), opt.about, width);
-        }
+    println!();
+    println!("{}", "Options".bold());
+    let options = || spec.options.iter().chain(std::iter::once(&RAW_OPT));
+    let width = options()
+        .map(|opt| opt.signature().chars().count())
+        .max()
+        .unwrap_or(0);
+    for opt in options() {
+        print_row(&opt.signature(), opt.about, width);
     }
     if !spec.examples.is_empty() {
         println!();
@@ -819,7 +876,16 @@ fn print_command(spec: &Spec) {
 
 fn print_row(left: &str, about: &str, width: usize) {
     let pad = " ".repeat(width.saturating_sub(left.chars().count()));
-    println!("  {}{pad}   {}", highlight(left), about.dimmed());
+    let mut lines = about.lines();
+    println!(
+        "  {}{pad}   {}",
+        highlight(left),
+        lines.next().unwrap_or_default().dimmed()
+    );
+    let indent = " ".repeat(width + 5);
+    for line in lines {
+        println!("{indent}{}", line.dimmed());
+    }
 }
 
 /// Colour a command line: `<placeholders>` yellow, literal words green.
@@ -840,9 +906,13 @@ fn highlight(line: &str) -> String {
 mod tests {
     use super::*;
 
-    fn parse_str(line: &str) -> Result<Command, UsageError> {
+    fn parse_raw(line: &str) -> Result<Invocation, UsageError> {
         let args: Vec<String> = line.split_whitespace().map(String::from).collect();
         parse(&args)
+    }
+
+    fn parse_str(line: &str) -> Result<Command, UsageError> {
+        parse_raw(line).map(|invocation| invocation.command)
     }
 
     fn error_of(line: &str) -> String {
@@ -998,6 +1068,37 @@ mod tests {
             error_of("--proxy=1.2.3.4:1080 web"),
             "--proxy takes no value"
         );
+    }
+
+    #[test]
+    fn raw_is_global() {
+        for line in [
+            "--raw ls",
+            "ls --raw",
+            "--raw --raw ls",
+            "--raw run all uptime",
+            "run --raw all uptime",
+            "--raw web",
+            "web --raw",
+            "--raw -x web",
+            "cp --raw web:/etc .",
+            "--raw",
+        ] {
+            assert!(parse_raw(line).unwrap().raw, "{line}");
+        }
+        for line in ["ls", "web", "run all uptime --raw", "-x"] {
+            assert!(!parse_raw(line).unwrap().raw, "{line}");
+        }
+        assert_eq!(
+            parse_str("run all uptime --raw"),
+            Ok(Command::Run {
+                servers: "all".into(),
+                command: vec!["uptime".into(), "--raw".into()],
+                proxy: false,
+            })
+        );
+        assert_eq!(parse_str("--raw web"), Ok(connect("web")));
+        assert_eq!(parse_str("--raw"), Ok(Command::Pick { proxy: false }));
     }
 
     #[test]

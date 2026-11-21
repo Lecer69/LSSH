@@ -159,6 +159,19 @@ pub fn list(names_only: bool) -> Result<()> {
         }
         return Ok(());
     }
+    if out::raw() {
+        // name, user@host[:port], last use (Unix time, or empty), key.
+        for server in servers {
+            let last = server.last_used.map(|t| t.to_string()).unwrap_or_default();
+            let key = server
+                .identity
+                .as_ref()
+                .map(|k| k.display().to_string())
+                .unwrap_or_default();
+            println!("{}\t{}\t{last}\t{key}", server.name, server.address());
+        }
+        return Ok(());
+    }
     if servers.is_empty() {
         out::info("no servers saved yet");
         out::hint("add one with: lssh add <name> <user@host>");
@@ -256,6 +269,9 @@ pub fn remove(name: &str) -> Result<()> {
 
 pub fn passwd(name: &str) -> Result<()> {
     let server = Store::open()?.get(name)?.clone();
+    if out::raw() {
+        bail!("lssh passwd asks on the terminal, so it can't run with --raw");
+    }
     let entered = password::prompt(&format!("new password for {}: ", server.address()))?;
     password::set(&server.name, &entered)?;
 
@@ -367,6 +383,9 @@ fn show_config(path: &Path) -> Result<()> {
 
 /// Open the config in the user's editor, then check what they wrote.
 fn edit_config(path: &Path) -> Result<()> {
+    if out::raw() {
+        bail!("lssh config edit opens an editor, so it can't run with --raw");
+    }
     ensure_config(path)?;
     let editor = ["VISUAL", "EDITOR"]
         .iter()

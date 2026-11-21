@@ -51,11 +51,6 @@ impl Server {
         }
     }
 
-    /// `user@host:path` as understood by scp.
-    pub fn scp_path(&self, path: &str) -> String {
-        format!("{}@{}:{path}", self.user, bracket_ipv6(&self.host))
-    }
-
     /// `-o` options for the port and key. They work the same for ssh, scp,
     /// sftp and ssh-copy-id, unlike `-p`/`-P`/`-i`.
     pub fn ssh_options(&self) -> Vec<String> {
@@ -454,14 +449,13 @@ mod tests {
     }
 
     #[test]
-    fn address_and_scp_path() {
+    fn address_brackets_ipv6() {
         let mut server = Server::new("web", "root@11.12.13.14").unwrap();
         assert_eq!(server.address(), "root@11.12.13.14");
         server.port = Some(2222);
         assert_eq!(server.address(), "root@11.12.13.14:2222");
         server.host = "2001:db8::1".into();
         assert_eq!(server.address(), "root@[2001:db8::1]:2222");
-        assert_eq!(server.scp_path("/tmp/x"), "root@[2001:db8::1]:/tmp/x");
         assert_eq!(server.target(), "root@2001:db8::1");
     }
 

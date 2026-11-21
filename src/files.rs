@@ -502,7 +502,17 @@ impl Runner {
             let local = dir.join(sftp::file_name(source));
             if attrs.is_dir() {
                 plan.push(Item::dir(local.clone(), source.clone()));
-                self.plan_remote(id, source, &local, &mut plan, &mut skipped, 0)?;
+                let cancelled = Arc::clone(&self.cancelled);
+                let is_cancelled = || cancelled.lock().is_ok_and(|set| set.contains(&id));
+                plan_remote(
+                    self.sftp()?,
+                    source,
+                    &local,
+                    &mut plan,
+                    &mut skipped,
+                    0,
+                    &is_cancelled,
+                )?;
             } else if attrs.is_file() {
                 plan.push(Item::file(
                     local,
@@ -550,54 +560,6 @@ impl Runner {
             tracker.finish_file(item.size);
         }
         Ok(done_message("downloaded", &tracker, skipped))
-    }
-
-    fn plan_remote(
-        &mut self,
-        id: u64,
-        dir: &str,
-        local: &Path,
-        plan: &mut Vec<Item>,
-        skipped: &mut u64,
-        depth: usize,
-    ) -> Result<()> {
-        if depth > MAX_DEPTH {
-            bail!("{dir} is nested too deeply");
-        }
-        if self.is_cancelled(id) {
-            return Err(Cancelled.into());
-        }
-        let entries = self.sftp()?.read_dir(dir)?;
-        for entry in entries {
-            let remote = sftp::join(dir, &entry.name);
-            let target = local.join(&entry.name);
-            let mut attrs = entry.attrs;
-            if attrs.is_symlink() {
-                // Links to files are copied; links to folders are skipped so
-                // a loop can't recurse forever.
-                match self.sftp()?.stat(&remote) {
-                    Ok(followed) if followed.is_file() => attrs = followed,
-                    _ => {
-                        *skipped += 1;
-                        continue;
-                    }
-                }
-            }
-            if attrs.is_dir() {
-                plan.push(Item::dir(target.clone(), remote.clone()));
-                self.plan_remote(id, &remote, &target, plan, skipped, depth + 1)?;
-            } else if attrs.is_file() {
-                plan.push(Item::file(
-                    target,
-                    remote,
-                    attrs.size.unwrap_or(0),
-                    attrs.permissions.unwrap_or(0o644),
-                ));
-            } else {
-                *skipped += 1;
-            }
-        }
-        Ok(())
     }
 
     fn delete(&mut self, id: u64, paths: &[String]) -> Result<String> {
@@ -660,6 +622,56 @@ impl Runner {
     }
 }
 
+/// Add everything inside the remote folder `dir` to the download plan.
+/// `cancelled` is checked once per folder.
+pub fn plan_remote(
+    sftp: &mut Sftp,
+    dir: &str,
+    local: &Path,
+    plan: &mut Vec<Item>,
+    skipped: &mut u64,
+    depth: usize,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
+    if depth > MAX_DEPTH {
+        bail!("{dir} is nested too deeply");
+    }
+    if cancelled() {
+        return Err(Cancelled.into());
+    }
+    let entries = sftp.read_dir(dir)?;
+    for entry in entries {
+        let remote = sftp::join(dir, &entry.name);
+        let target = local.join(&entry.name);
+        let mut attrs = entry.attrs;
+        if attrs.is_symlink() {
+            // Links to files are copied; links to folders are skipped so
+            // a loop can't recurse forever.
+            match sftp.stat(&remote) {
+                Ok(followed) if followed.is_file() => attrs = followed,
+                _ => {
+                    *skipped += 1;
+                    continue;
+                }
+            }
+        }
+        if attrs.is_dir() {
+            plan.push(Item::dir(target.clone(), remote.clone()));
+            plan_remote(sftp, &remote, &target, plan, skipped, depth + 1, cancelled)?;
+        } else if attrs.is_file() {
+            plan.push(Item::file(
+                target,
+                remote,
+                attrs.size.unwrap_or(0),
+                attrs.permissions.unwrap_or(0o644),
+            ));
+        } else {
+            *skipped += 1;
+        }
+    }
+    Ok(())
+}
+
 /// Folders deeper than this are refused (a safety net against loops).
 const MAX_DEPTH: usize = 64;
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
@@ -678,16 +690,16 @@ fn check_deletable(path: &str) -> Result<()> {
 }
 
 /// One step of a transfer.
-struct Item {
-    local: PathBuf,
-    remote: String,
-    is_dir: bool,
-    size: u64,
-    mode: u32,
+pub struct Item {
+    pub local: PathBuf,
+    pub remote: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub mode: u32,
 }
 
 impl Item {
-    fn dir(local: PathBuf, remote: String) -> Item {
+    pub fn dir(local: PathBuf, remote: String) -> Item {
         Item {
             local,
             remote,
@@ -697,7 +709,7 @@ impl Item {
         }
     }
 
-    fn file(local: PathBuf, remote: String, size: u64, mode: u32) -> Item {
+    pub fn file(local: PathBuf, remote: String, size: u64, mode: u32) -> Item {
         Item {
             local,
             remote,
@@ -708,13 +720,13 @@ impl Item {
     }
 }
 
-fn mode_of(meta: &fs::Metadata) -> u32 {
+pub fn mode_of(meta: &fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     meta.permissions().mode()
 }
 
 /// Add everything inside the local folder `dir` to the upload plan.
-fn plan_local(
+pub fn plan_local(
     dir: &Path,
     remote: &str,
     plan: &mut Vec<Item>,

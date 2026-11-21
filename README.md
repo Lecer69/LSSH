@@ -68,7 +68,7 @@ saved proxy (see [Proxy](#proxy)).
 ```bash
 lssh run all uptime                  # every output line is prefixed with the server
 lssh run web -- df -h /              # one server: its exit status becomes lssh's
-lssh cp web:/var/log/syslog .        # download
+lssh cp web:/var/log/syslog .        # download, with a progress bar
 lssh cp -r ./site web:/srv/www       # upload a directory
 lssh status                          # ● up 43 ms  OpenSSH_9.6 ...  (exit 1 if any is down)
 ```
@@ -83,6 +83,22 @@ error: missing <user@host[:port]>
 
 Output has no colours when piped. Usage errors exit with status 2, other
 failures with 1.
+
+### Raw mode
+
+`--raw` (or `LSSH_RAW=1`) makes lssh easy to drive from scripts and AI agents:
+plain text with no colours, symbols, hints, stats bar, file panel or progress
+bar, and lssh never waits for input. A server without a saved password or key
+fails instead of prompting, and ssh offers no password at all, so no empty
+attempts are sent. `list` and `status` print tab-separated columns:
+
+```bash
+$ lssh --raw ls          # name, address, last used (Unix time), key
+web	root@11.12.13.14	1795184947	
+$ lssh --raw status      # name, up/down, latency in ms, version or reason
+web	up	43	OpenSSH_9.6p1
+db	down		connection refused
+```
 
 ## Passwords and keys
 

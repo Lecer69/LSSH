@@ -367,7 +367,8 @@ impl Sftp {
         if !control_path.exists() {
             bail!("the session is not logged in yet");
         }
-        let mut child = Command::new("ssh")
+        let mut command = Command::new("ssh");
+        command
             .arg("-o")
             .arg(format!("ControlPath={}", control_path.display()))
             .args([
@@ -377,13 +378,16 @@ impl Sftp {
                 "BatchMode=yes",
                 "-o",
                 "ProxyCommand=false",
-                "-o",
-                "LogLevel=ERROR",
-                "-T",
-                "-x",
-                "-a",
-                "-s",
-            ])
+            ]);
+        Self::start(command, target)
+    }
+
+    /// Start the sftp subsystem with `ssh`, a command that already has
+    /// its connection options (port, key, proxy, askpass...). It logs in
+    /// on its own.
+    pub fn start(mut ssh: Command, target: &str) -> Result<Sftp> {
+        let mut child = ssh
+            .args(["-o", "LogLevel=ERROR", "-T", "-x", "-a", "-s"])
             .arg(target)
             .arg("sftp")
             .stdin(Stdio::piped())
